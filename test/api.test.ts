@@ -99,6 +99,22 @@ test("a stale edit is shifted past a concurrent row insert", async () => {
   assert.deepEqual(r.data.values, [[null, null], ["cake", 5], ["total", 8]]);
 });
 
+test("a resent change (same client and seq) is applied once", async () => {
+  const b = (await req("GET", "/api/books/Budget")).data;
+  const s = b.sheets[0].id;
+  const body = { ops: [{ t: "insert", s, axis: "row", at: 0, n: 1 }], client: "c9", seq: 1 };
+  const first = await req("POST", "/api/books/Budget/ops", body);
+  const again = await req("POST", "/api/books/Budget/ops", body);
+  assert.equal(again.data.v, first.data.v);
+  await req("POST", "/api/books/Budget/ops", { ops: [{ t: "delete", s, axis: "row", at: 0, n: 1 }] });
+});
+
+test("reads past the sheet edge return the full requested block", async () => {
+  const r = await req("GET", "/api/books/Budget/range?ref=Y1:AB1");
+  assert.equal(r.data.range, "Y1:AB1");
+  assert.equal(r.data.values[0].length, 4);
+});
+
 test("data survives a restart", async () => {
   await srv.close();
   await boot();

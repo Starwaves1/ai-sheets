@@ -1,5 +1,6 @@
-// Browser side of collaboration. Local edits apply immediately (optimistic) and are
-// sent one change at a time; the server's SSE stream is the single ordering.
+// Browser side of collaboration. Local edits apply immediately (optimistic). They are
+// sent one change at a time, and the next is sent only after the server's SSE stream
+// echoes the previous one back, so the server never has to rebase our own ops.
 // When someone else's change arrives first, pending local ops are rebased over it.
 
 import type { DocJSON } from "../core/model.ts";
@@ -12,12 +13,14 @@ interface Change {
   actor: string;
   client: string;
   ts: number;
+  seq?: number;
 }
 
 interface Pending {
   ops: Op[];
   inverse: Op[];
   sent: boolean;
+  seq: number;
 }
 
 export interface ChangeEvent {
@@ -40,7 +43,7 @@ export class Session {
   private pending: Pending[] = [];
   private undoStack: Op[][] = [];
   private redoStack: Op[][] = [];
-  private inflight = false;
+  private seq = 0;
   private es: EventSource | null = null;
   status: Status = "connecting";
   onChange: (e: ChangeEvent) => void = () => {};
@@ -94,7 +97,7 @@ export class Session {
   submit(ops: Op[], opts: { undoable?: boolean } = {}): void {
     if (!ops.length) return;
     const res = this.wb.apply(ops);
-    this.pending.push({ ops, inverse: res.inverse, sent: false });
+    this.pending.push({ ops, inverse: res.inverse, sent: false, seq: ++this.seq });
     if (opts.undoable !== false) {
       this.undoStack.push(res.inverse);
       if (this.undoStack.length > 200) this.undoStack.shift();
@@ -125,7 +128,7 @@ export class Session {
     if (!ops) return null;
     try {
       const res = this.wb.apply(ops);
-      this.pending.push({ ops, inverse: res.inverse, sent: false });
+      this.pending.push({ ops, inverse: res.inverse, sent: false, seq: ++this.seq });
       to.push(res.inverse);
       this.emit(ops, false);
       this.flush();
@@ -151,34 +154,29 @@ export class Session {
   }
 
   private async flush(): Promise<void> {
-    if (this.inflight) return;
-    const next = this.pending.find((p) => !p.sent);
+    if (this.pending.some((p) => p.sent)) return; // wait for the echo of the one in flight
+    const next = this.pending[0];
     if (!next) return;
-    this.inflight = true;
     next.sent = true;
+    const retry = (msg: string, ms: number) => {
+      next.sent = false;
+      this.onError(msg);
+      setTimeout(() => this.flush(), ms);
+    };
     try {
       const res = await fetch(`/api/books/${encodeURIComponent(this.bookId)}/ops`, {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ ops: next.ops, base: this.version, client: this.client }),
+        body: JSON.stringify({ ops: next.ops, base: this.version, client: this.client, seq: next.seq }),
       });
-      if (!res.ok) {
-        const msg = ((await res.json().catch(() => ({}))) as { error?: string }).error ?? res.statusText;
-        if (res.status >= 400 && res.status < 500) this.reject(next, msg);
-        else {
-          next.sent = false;
-          this.onError(`Save failed (${msg}); retrying`);
-          setTimeout(() => this.flush(), 2000);
-        }
-      }
+      if (res.ok) return; // acknowledged through the event stream
+      const msg = ((await res.json().catch(() => ({}))) as { error?: string }).error ?? res.statusText;
+      if (res.status < 500) this.reject(next, msg);
+      else retry(`Save failed (${msg}); retrying`, 2000);
     } catch {
-      next.sent = false;
-      this.onError("Offline: edits will be saved when the server is back");
-      setTimeout(() => this.flush(), 3000);
-    } finally {
-      this.inflight = false;
+      // The server deduplicates by seq, so resending a change that did arrive is safe.
+      retry("Offline: edits will be saved when the server is back", 3000);
     }
-    if (this.pending.some((p) => !p.sent)) this.flush();
   }
 
   /** The server refused a change: take it back out of the local state. */
@@ -188,15 +186,17 @@ export class Session {
     for (const p of this.pending) p.inverse = this.wb.apply(p.ops).inverse;
     this.onError(`Change rejected: ${msg}`);
     this.emit(bad.ops, true);
+    this.flush();
   }
 
   private receive(c: Change): void {
     if (c.v <= this.version) return;
     this.version = c.v;
     if (c.client === this.client) {
-      // Our own change, acknowledged in order.
-      const i = this.pending.findIndex((p) => p.sent);
+      // Our own change, acknowledged in order: send the next one.
+      const i = this.pending.findIndex((p) => (c.seq !== undefined ? p.seq === c.seq : p.sent));
       if (i >= 0) this.pending.splice(i, 1);
+      this.flush();
       return;
     }
     // Someone else's change was ordered before our pending ones: rebase.
@@ -208,9 +208,14 @@ export class Session {
       this.onReset();
       return;
     }
+    // Rebase in order: each pending change moves past the remote ops, and the remote
+    // ops move past it before meeting the next pending change.
     const moves = c.ops.some((op) => op.t === "insert" || op.t === "delete" || op.t === "deleteSheet");
+    let remote = c.ops;
     for (const p of this.pending) {
-      if (moves) p.ops = transformAll(p.ops, c.ops, this.wb.doc);
+      const before = p.ops;
+      p.ops = transformAll(before, remote, this.wb.doc);
+      remote = transformAll(remote, before, this.wb.doc);
       try {
         p.inverse = this.wb.apply(p.ops).inverse;
       } catch {

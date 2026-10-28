@@ -201,3 +201,17 @@ test("failed op batches roll back atomically", () => {
   ]));
   assert.equal(val(wb, "A1"), 1);
 });
+
+test("whole-column sums update when data is written past the sheet's edge", () => {
+  const wb = book({ A1: "1", B1: "=SUM(A:A)" });
+  assert.equal(val(wb, "B1"), 1);
+  wb.apply([{ t: "set", s: "s1", cells: [[1599, 0, "1000"]] }]);
+  assert.equal(val(wb, "B1"), 1001);
+});
+
+test("ROUNDUP rounds tiny positive numbers up", () => {
+  const wb = book({ A1: "=ROUNDUP(1E-12,0)", A2: "=ROUNDUP(2.1,0)", A3: "=ROUNDUP(3,0)" });
+  assert.equal(val(wb, "A1"), 1);
+  assert.equal(val(wb, "A2"), 3);
+  assert.equal(val(wb, "A3"), 3);
+});

@@ -88,6 +88,7 @@ function target(lb: LiveBook, ref: string | null): { sheet: Sheet; range: SheetR
   const used = usedRange(sheet);
   if (range.r2 >= MAX_ROWS - 1) range = { ...range, r2: Math.max(range.r1, used?.r2 ?? 0) };
   if (range.c2 >= MAX_COLS - 1) range = { ...range, c2: Math.max(range.c1, used?.c2 ?? 0) };
+  if ((range.r2 - range.r1 + 1) * (range.c2 - range.c1 + 1) > 2_000_000) throw new HttpError(400, `${ref} is more than 2 million cells`);
   return { sheet, range, hadRange: true };
 }
 
@@ -119,9 +120,9 @@ export function makeApi(hub: Hub) {
     return lb;
   };
 
-  const submit = (lb: LiveBook, ops: Op[], actor: Actor, extra: { base?: number; client?: string } = {}) => {
+  const submit = (lb: LiveBook, ops: Op[], actor: Actor, extra: { base?: number; client?: string; seq?: number } = {}) => {
     try {
-      return lb.submit(hub.store, ops, { actor: actor.name, client: extra.client ?? "", ...(extra.base !== undefined ? { base: extra.base } : {}) });
+      return lb.submit(hub.store, ops, { actor: actor.name, client: extra.client ?? "", ...extra });
     } catch (e) {
       if (e instanceof OpError) throw new HttpError(400, e.message);
       throw e;
@@ -171,7 +172,8 @@ export function makeApi(hub: Hub) {
       const ops = j.ops as Op[];
       const base = typeof j.base === "number" ? j.base : undefined;
       const client = typeof j.client === "string" ? j.client : "";
-      const c = submit(lb, ops, actor, { ...(base !== undefined ? { base } : {}), client });
+      const seq = typeof j.seq === "number" ? j.seq : undefined;
+      const c = submit(lb, ops, actor, { ...(base !== undefined ? { base } : {}), ...(seq !== undefined ? { seq } : {}), client });
       return send(res, 200, { v: c.v });
     }
 

@@ -88,6 +88,19 @@ try {
   const afterUndo = await cli("get", book.id, "C3", "--csv");
   check(afterUndo.trim() === "", "undo in the browser reaches the server", JSON.stringify(afterUndo));
 
+  // Pasting past the last column grows the sheet instead of dropping cells.
+  await page.click(".addr");
+  await page.keyboard.type("Y1");
+  await page.keyboard.press("Enter");
+  await page.evaluate(() => {
+    const dt = new DataTransfer();
+    dt.setData("text/plain", "p\tq\tr\ts");
+    document.querySelector(".scroller")!.dispatchEvent(new ClipboardEvent("paste", { clipboardData: dt, bubbles: true }));
+  });
+  await page.waitForTimeout(300);
+  const pasted = await cli("get", book.id, "Y1:AB1", "--csv");
+  check(pasted === "p,q,r,s\n", "paste past the last column grows the sheet", JSON.stringify(pasted));
+
   // 3. idle cost
   await page.waitForTimeout(2200); // let the highlight fade finish
   const cdp = await ctx.newCDPSession(page);

@@ -64,7 +64,7 @@ function roundTo(x: number, digits: number, mode: "round" | "up" | "down"): numb
   const y = Math.abs(x) * f;
   // Nudge by a relative epsilon so 1.005 rounds like people expect.
   const e = y * (1 + Number.EPSILON * 4);
-  const r = mode === "round" ? Math.round(e) : mode === "up" ? Math.ceil(y - 1e-9) : Math.floor(e);
+  const r = mode === "round" ? Math.round(e) : mode === "up" ? Math.ceil(y * (1 - Number.EPSILON * 4)) : Math.floor(e);
   return (Math.sign(x) * r) / f;
 }
 
@@ -133,8 +133,6 @@ function ifAgg(args: Node[], ev: Ev, kind: "count" | "sum" | "avg"): Scalar {
   if (kind === "sum") return sum;
   return count === 0 ? new Err("#DIV/0!", "no matching numbers") : sum / count;
 }
-
-// ---- table ----------------------------------------------------------------------
 
 export const FUNCTIONS: Record<string, Fn> = {
   SUM(args, ev) {

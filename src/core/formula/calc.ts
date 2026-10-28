@@ -187,7 +187,8 @@ export class Calc {
             return this.get(sheet, n.r1, n.c1);
           }
           const g = clamp(n, sheet.rows, sheet.cols);
-          ranges.push({ sheet: sheet.id, ...g });
+          // Record the range as written: cells added beyond the current edge must still invalidate it.
+          ranges.push({ sheet: sheet.id, r1: n.r1, c1: n.c1, r2: n.r2, c2: n.c2 });
           const rows = Math.max(0, Math.min(n.r2, sheet.rows - 1) - g.r1 + 1);
           const cols = Math.max(0, Math.min(n.c2, sheet.cols - 1) - g.c1 + 1);
           return { rows, cols, at: (i, j) => this.get(sheet, g.r1 + i, g.c1 + j) };

@@ -1,6 +1,6 @@
 // A Doc plus its formula engine: the object both server and browser hold.
 
-import { clamp, type Range } from "./a1.ts";
+import type { Range } from "./a1.ts";
 import { displayValue } from "./display.ts";
 import { Calc } from "./formula/calc.ts";
 import { Err, type Scalar } from "./formula/values.ts";
@@ -43,7 +43,7 @@ export class Workbook {
   /** Read a block of cells, row-major (which also keeps long formula chains shallow). */
   read(sheetId: string, range: Range, what: "values" | "inputs" | "display"): Array<Array<Scalar | string>> {
     const sheet = getSheet(this.doc, sheetId);
-    const g = clamp(range, Math.max(sheet.rows, range.r1 + 1), Math.max(sheet.cols, range.c1 + 1));
+    const g = range; // cells past the sheet edge read as empty
     const out: Array<Array<Scalar | string>> = [];
     for (let r = g.r1; r <= g.r2; r++) {
       const row: Array<Scalar | string> = [];

@@ -262,7 +262,9 @@ export class Grid {
 
   /** Repaint cell contents after a data change (layout unchanged). */
   refresh(): void {
-    this.render();
+    // Writing past the edge grows the sheet; that needs a new layout.
+    if (this.sheet.rows !== this.rowPos.length || this.sheet.cols !== this.colPos.length) this.layout();
+    else this.render();
   }
 
   flash(sheetId: string, cells: Array<[number, number]>): void {

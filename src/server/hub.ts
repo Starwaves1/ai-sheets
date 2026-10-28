@@ -63,7 +63,12 @@ export class LiveBook {
     return store.changesSince(this.id, since);
   }
 
-  submit(store: Store, rawOps: unknown, meta: { base?: number; actor: string; client: string }): Change {
+  submit(store: Store, rawOps: unknown, meta: { base?: number; actor: string; client: string; seq?: number }): Change {
+    // A client that lost the response to a request may send it again; apply it once.
+    if (meta.client && meta.seq !== undefined) {
+      const dup = this.recent.find((c) => c.client === meta.client && c.seq === meta.seq);
+      if (dup) return dup;
+    }
     let ops = validateOps(rawOps);
     const base = meta.base ?? this.version;
     if (base < this.version) {
@@ -72,6 +77,7 @@ export class LiveBook {
     }
     this.wb.apply(ops); // throws OpError and leaves the doc untouched on invalid ops
     const change: Change = { v: this.version + 1, ops, actor: meta.actor, client: meta.client, ts: Date.now() };
+    if (meta.seq !== undefined) change.seq = meta.seq;
     store.append(this.id, change, this.name);
     this.version = change.v;
     this.updated = change.ts;

@@ -676,8 +676,11 @@ class BookPage {
         const cell = fill ? block[0]![0]! : block[i]?.[j];
         if (!cell) continue;
         const di = r.i1 + i, dj = r.j1 + j;
-        if (di >= g.rowCount || dj >= g.colCount) continue;
-        const t = g.dataOf(di, dj);
+        // Past the last row/column the paste grows the sheet (a set beyond the edge extends it).
+        const t = {
+          r: di < g.rowCount ? g.rows[di]! : s.rows + di - g.rowCount,
+          c: dj < g.colCount ? g.cols[dj]! : s.cols + dj - g.colCount,
+        };
         let v = cell.v;
         if (v && cell.src && isFormula(v)) v = moveRefs(v, t.r - cell.src.r, t.c - cell.src.c);
         vals.push([t.r, t.c, v]);
@@ -686,14 +689,8 @@ class BookPage {
     }
     const ops: Op[] = [{ t: "set", s: s.id, cells: vals }];
     if (fmts.length) ops.push({ t: "fmt", s: s.id, cells: fmts });
-    // Grow the grid if the paste runs off the end.
-    const maxR = r.i1 + rows - 1, maxC = r.j1 + cols - 1;
-    if (maxR >= g.rowCount || maxC >= g.colCount) {
-      ops.unshift({ t: "grid", s: s.id, rows: Math.max(s.rows, s.rows + maxR - g.rowCount + 1), cols: Math.max(s.cols, s.cols + maxC - g.colCount + 1) });
-      if (this.submit(ops)) this.grid.select(g.dataOf(r.i1, r.j1), g.dataOf(maxR, maxC));
-      return;
-    }
-    if (this.submit(ops)) g.select(g.dataOf(r.i1, r.j1), g.dataOf(r.i1 + rows - 1, r.j1 + cols - 1), false);
+    const end = vals[vals.length - 1];
+    if (end && this.submit(ops)) g.select(g.dataOf(r.i1, r.j1), { r: end[0], c: end[1] }, false);
   }
 
   /** Ctrl+D / Ctrl+R: copy the first row (or column) of the selection across it. */

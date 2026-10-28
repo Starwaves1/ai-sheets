@@ -13,6 +13,7 @@ export interface Change {
   actor: string;
   client: string;
   ts: number;
+  seq?: number; // client's own counter, used to drop a resent change
 }
 
 export interface BookRow {
