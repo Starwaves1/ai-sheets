@@ -5,7 +5,7 @@
 //   transform(op, prior)  rewrites op made concurrently with `prior` so it applies after it
 
 import type { Range } from "./a1.ts";
-import { isFormula, moveRefs, renameSheetRefs, shiftRefs } from "./formula/rewrite.ts";
+import { isFormula, renameSheetRefs, shiftRefs } from "./formula/rewrite.ts";
 import {
   COND_OPS, FORMAT_KEYS, getSheet, key, keyCol, keyRow, OpError, sheetFromJSON, sheetToJSON,
   type CondRule, type Doc, type Format, type Sheet, type SheetJSON, type ViewState,
@@ -522,30 +522,6 @@ export function transformAll(ops: Op[], prior: Op[], doc?: Doc): Op[] {
     });
   }
   return out;
-}
-
-/** Ops that copy `src` cell inputs (with relative refs offset) and formats to a target anchor. */
-export function pasteOps(
-  sheetId: string, r0: number, c0: number,
-  block: Array<Array<{ v?: string | null; f?: Format | null }>>, srcR: number | null, srcC: number | null,
-): Op[] {
-  const vals: Array<[number, number, string | null]> = [];
-  const fmts: Array<[number, number, Format | null]> = [];
-  let anyFmt = false;
-  block.forEach((rowCells, i) =>
-    rowCells.forEach((cell, j) => {
-      let v = cell.v ?? null;
-      if (v && srcR !== null && srcC !== null && isFormula(v)) v = moveRefs(v, r0 - srcR, c0 - srcC);
-      vals.push([r0 + i, c0 + j, v]);
-      if (cell.f !== undefined) {
-        anyFmt = true;
-        fmts.push([r0 + i, c0 + j, cell.f]);
-      }
-    }),
-  );
-  const ops: Op[] = [{ t: "set", s: sheetId, cells: vals }];
-  if (anyFmt) ops.push({ t: "fmt", s: sheetId, cells: fmts });
-  return ops;
 }
 
 /** Does this op change anything a user would want highlighted? Returns the touched cells. */

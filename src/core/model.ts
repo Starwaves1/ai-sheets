@@ -15,9 +15,10 @@ export interface Format {
   align?: Align;
   nf?: string; // number format, e.g. "0.00", "0%", "#,##0", "$#,##0.00"
   wrap?: boolean;
+  rot?: 90; // text rotated to read bottom-to-top, for tall narrow header rows
 }
 
-export const FORMAT_KEYS = ["b", "i", "s", "color", "fill", "align", "nf", "wrap"] as const;
+export const FORMAT_KEYS = ["b", "i", "s", "color", "fill", "align", "nf", "wrap", "rot"] as const;
 
 /** Named colors render with theme-aware shades (see styles.css). */
 export const PALETTE = ["green", "red", "amber", "blue", "violet", "grey"] as const;

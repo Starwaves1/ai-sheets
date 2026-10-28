@@ -36,7 +36,7 @@ interface Args {
   flags: Map<string, string | true>;
 }
 
-const BOOL_FLAGS = new Set(["csv", "tsv", "json", "formulas", "desc", "bold", "no-bold", "italic", "no-italic", "strike", "no-strike", "wrap", "no-wrap", "reset", "formats", "clear", "off", "yes", "help", "values"]);
+const BOOL_FLAGS = new Set(["csv", "tsv", "json", "formulas", "desc", "bold", "no-bold", "italic", "no-italic", "strike", "no-strike", "wrap", "no-wrap", "rotate", "no-rotate", "reset", "formats", "clear", "off", "yes", "help", "values"]);
 
 function parseArgs(argv: string[]): Args {
   const pos: string[] = [];
@@ -149,7 +149,7 @@ const HELP = `sheets: read and edit workbooks on the sheets server (${SERVER})
   sheets set <book> <anchor> --csv <file|-> | --tsv <file|-> | --json '[[1,2],[3,4]]'
   sheets clear <book> <range> [--formats]
   sheets format <book> <range> [--bold] [--italic] [--strike] [--color C] [--fill C]
-                [--align left|center|right] [--nf 0.00|0%|#,##0|$#,##0.00] [--wrap] [--reset]
+                [--align left|center|right] [--nf 0.00|0%|#,##0|$#,##0.00] [--wrap] [--rotate] [--reset]
   sheets cond <book> [--sheet S]              list conditional fill rules
   sheets cond <book> add <range> <op> [value] [value2] --fill C [--color C] [--bold]
                 ops: ${COND_OPS.join(" ")}
@@ -270,11 +270,13 @@ async function main(argv: string[]): Promise<void> {
     case "format": {
       need(2, "format <book> <range> [--bold] [--fill C] ...");
       const patch: FormatPatch = {};
-      if (a.flags.has("reset")) Object.assign(patch, { b: null, i: null, s: null, color: null, fill: null, align: null, nf: null, wrap: null });
+      if (a.flags.has("reset")) Object.assign(patch, { b: null, i: null, s: null, color: null, fill: null, align: null, nf: null, wrap: null, rot: null });
       for (const [f, k] of [["bold", "b"], ["italic", "i"], ["strike", "s"], ["wrap", "wrap"]] as const) {
         if (a.flags.has(f)) patch[k] = true;
         if (a.flags.has("no-" + f)) patch[k] = null;
       }
+      if (a.flags.has("rotate")) patch.rot = 90;
+      if (a.flags.has("no-rotate")) patch.rot = null;
       for (const k of ["color", "fill", "align", "nf"] as const) {
         const v = flag(a, k);
         if (v !== undefined) (patch as Record<string, unknown>)[k] = v === "none" || v === "" ? null : v;
