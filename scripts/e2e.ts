@@ -104,7 +104,40 @@ try {
   check(idle, "idle page does no work for 5 s",
     `rAF ${counts.raf}, timeouts ${counts.timeout}, intervals ${counts.interval}, running animations ${anims}, layouts ${d("LayoutCount")}, style recalcs ${d("RecalcStyleCount")}, script ${d("ScriptDuration")} s, tasks ${d("TaskDuration")} s`);
 
-  // 4. 50k cells
+  // 4. two browser tabs writing at once, one of them inserting a row
+  const other = await ctx.newPage();
+  await other.goto(`${BASE}/b/${book.id}`, { waitUntil: "networkidle" });
+  await other.waitForSelector(".live.live");
+  const typeAt = async (p: typeof page, ref: string, text: string) => {
+    await p.click(".addr");
+    await p.keyboard.type(ref);
+    await p.keyboard.press("Enter");
+    await p.keyboard.type(text);
+    await p.keyboard.press("Enter");
+  };
+  await Promise.all([
+    (async () => { for (let i = 0; i < 8; i++) await typeAt(page, `E${i + 2}`, `a${i}`); })(),
+    (async () => { for (let i = 0; i < 8; i++) await typeAt(other, `F${i + 2}`, `b${i}`); })(),
+  ]);
+  const typed = await cli("get", book.id, "E2:F9", "--csv");
+  const want = Array.from({ length: 8 }, (_, i) => `a${i},b${i}`).join("\n") + "\n";
+  check(typed === want, "two tabs typing at once never clobber each other", JSON.stringify(typed));
+  // An agent inserts a row above row 2: both tabs and the server agree on where the data went.
+  const sid = (await api("GET", `/api/books/${book.id}`)).sheets[0].id;
+  await api("POST", `/api/books/${book.id}/ops`, { ops: [{ t: "insert", s: sid, axis: "row", at: 1, n: 1 }] });
+  await page.waitForTimeout(500);
+  const shifted = await cli("get", book.id, "E2:E3", "--csv");
+  const rowOf = (p: typeof page) => p.evaluate(() => {
+    const el = [...document.querySelectorAll(".c")].find((e) => e.textContent === "a0") as HTMLElement | undefined;
+    return el ? Math.round(el.getBoundingClientRect().top) : -1;
+  });
+  const [ya, yb] = [await rowOf(page), await rowOf(other)];
+  check(shifted === "\na0\n" && ya === yb && ya > 0, "a row inserted by an agent moves data in both tabs", `server ${JSON.stringify(shifted)}, a0 at y=${ya} and y=${yb}`);
+  const inSync = await Promise.all([page, other].map((p) => p.evaluate(() => [...document.querySelectorAll(".c")].map((e) => e.textContent).filter((t) => /^(a|b)\d$/.test(t!)).sort().join(","))));
+  check(inSync[0] === inSync[1] && inSync[0]!.split(",").length === 16, "both tabs show the same cells as the server", `${inSync[0]!.split(",").length} cells each`);
+  await other.close();
+
+  // 5. 50k cells
   const rows: string[] = [];
   for (let r = 0; r < 1000; r++) rows.push(Array.from({ length: 50 }, (_, c) => (c === 0 ? `row ${r + 1}` : String((r * 50 + c) % 997))).join(","));
   const big = await api("POST", `/api/books?name=${encodeURIComponent(`e2e big ${Date.now()}`)}`, rows.join("\n"), "text/csv");

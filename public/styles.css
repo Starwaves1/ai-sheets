@@ -354,7 +354,8 @@ code { font: 12.5px var(--mono); background: var(--hover); padding: 1px 5px; bor
 .sep { height: 1px; margin: 5px 4px; background: var(--rule); }
 
 .swatches { display: grid; grid-template-columns: repeat(4, 30px); gap: 6px; padding: 10px; }
-.swatch { width: 30px; height: 30px; border-radius: 6px; border: 1px solid var(--rule-2); padding: 0; font: 600 14px var(--sans); background: var(--paper); }
+.swatch { width: 30px; height: 30px; border-radius: 6px; border: 1px solid var(--rule-2); padding: 0; font: 600 14px var(--sans); }
+.swatch:not([class*="fill-"]) { background: var(--paper); }
 .swatch.on { outline: 2px solid var(--accent); outline-offset: 1px; }
 .swatch.none { background: linear-gradient(135deg, transparent 46%, var(--err) 46% 54%, transparent 54%), var(--paper); }
 .swatch[class*="fill-"] { border-color: transparent; }

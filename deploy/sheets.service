@@ -1,0 +1,18 @@
+# systemd user unit. Install: ln -s ~/sheets/deploy/sheets.service ~/.config/systemd/user/
+#   systemctl --user daemon-reload && systemctl --user enable --now sheets
+[Unit]
+Description=Sheets (spreadsheet for people and agents) on :8790
+After=network-online.target
+
+[Service]
+WorkingDirectory=%h/sheets
+Environment=SHEETS_PORT=8790
+Environment=SHEETS_HOST=0.0.0.0
+Environment=SHEETS_DATA=%h/sheets/data
+Environment=SHEETS_PUBLIC_URL=http://192.168.1.5:8790
+ExecStart=/usr/bin/node --disable-warning=ExperimentalWarning dist/server.js
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=default.target

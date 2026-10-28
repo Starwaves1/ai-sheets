@@ -22,6 +22,7 @@ interface SheetInfo {
 interface BookInfo {
   id: string;
   name: string;
+  url: string;
   version: number;
   updated: number;
   sheets: SheetInfo[];
@@ -196,7 +197,7 @@ async function main(argv: string[]): Promise<void> {
     case "show": {
       need(1, "show <book>");
       const b = await info(rest[0]!);
-      console.log(`${b.name}  (id ${b.id}, v${b.version}, edited ${ago(b.updated)})\n${SERVER}/b/${b.id}`);
+      console.log(`${b.name}  (id ${b.id}, v${b.version}, edited ${ago(b.updated)})\n${b.url.startsWith("http") ? b.url : SERVER + b.url}`);
       for (const s of b.sheets) {
         const frozen = s.frozenRows || s.frozenCols ? `, frozen ${s.frozenRows}r/${s.frozenCols}c` : "";
         console.log(`  ${s.name}: used ${s.used ?? "(empty)"}, grid ${s.rows}×${s.cols}${frozen}`);

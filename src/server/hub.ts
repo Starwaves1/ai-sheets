@@ -11,6 +11,8 @@ import { rangeName } from "../core/a1.ts";
 import type { Change, Store } from "./store.ts";
 
 const SNAPSHOT_EVERY = 200;
+/** Base URL people open in a browser (shown by the CLI); relative when unset. */
+const PUBLIC_URL = (process.env.SHEETS_PUBLIC_URL ?? "").replace(/\/$/, "");
 const RECENT = 1000;
 
 export const newId = (n = 8): string => {
@@ -39,6 +41,7 @@ export class LiveBook {
     return {
       id: this.id,
       name: this.name,
+      url: `${PUBLIC_URL}/b/${this.id}`,
       version: this.version,
       created: this.created,
       updated: this.updated,
