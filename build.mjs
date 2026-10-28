@@ -7,7 +7,7 @@ const node = { platform: "node", format: "esm", target: "node22", bundle: true, 
   banner: { js: "import { createRequire as __cr } from 'node:module'; const require = __cr(import.meta.url);" } };
 
 const targets = [
-  { ...node, entryPoints: ["src/server/main.ts"], outfile: "dist/server.js" },
+  { ...node, entryPoints: ["src/server/run.ts"], outfile: "dist/server.js" },
   { ...node, entryPoints: ["src/cli/main.ts"], outfile: "dist/cli.js" },
   { ...node, entryPoints: ["scripts/e2e.ts"], outfile: "dist/e2e.js", external: ["playwright-core"] },
   { entryPoints: ["src/client/main.ts"], outfile: "dist/public/app.js", bundle: true, format: "esm", platform: "browser",

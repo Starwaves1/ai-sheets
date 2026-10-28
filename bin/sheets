@@ -1,0 +1,4 @@
+#!/bin/sh
+# sheets CLI. Build first: npm run build
+here="$(dirname "$(readlink -f "$0")")"
+exec node "$here/../dist/cli.js" "$@"
