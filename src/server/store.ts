@@ -55,6 +55,8 @@ export class Store {
         PRIMARY KEY (book, v)
       );
     `);
+    const cols = this.db.prepare("PRAGMA table_info(changes)").all() as Array<{ name: string }>;
+    if (!cols.some((c) => c.name === "seq")) this.db.exec("ALTER TABLE changes ADD COLUMN seq INTEGER");
   }
 
   books(): BookRow[] {
@@ -81,8 +83,8 @@ export class Store {
     this.db.exec("BEGIN");
     try {
       this.db
-        .prepare("INSERT INTO changes (book, v, ts, actor, client, ops) VALUES (?, ?, ?, ?, ?, ?)")
-        .run(book, c.v, c.ts, c.actor, c.client, JSON.stringify(c.ops));
+        .prepare("INSERT INTO changes (book, v, ts, actor, client, ops, seq) VALUES (?, ?, ?, ?, ?, ?, ?)")
+        .run(book, c.v, c.ts, c.actor, c.client, JSON.stringify(c.ops), c.seq ?? null);
       this.db.prepare("UPDATE books SET version = ?, updated = ?, name = ? WHERE id = ?").run(c.v, c.ts, name, book);
       this.db.exec("COMMIT");
     } catch (e) {
@@ -97,9 +99,10 @@ export class Store {
 
   changesSince(book: string, since: number, limit = 100_000): Change[] {
     const rows = this.db
-      .prepare("SELECT v, ts, actor, client, ops FROM changes WHERE book = ? AND v > ? ORDER BY v LIMIT ?")
+      .prepare("SELECT v, ts, actor, client, ops, seq FROM changes WHERE book = ? AND v > ? ORDER BY v LIMIT ?")
       .all(book, since, limit) as Array<Record<string, unknown>>;
     return rows.map((r) => ({
+      ...(r.seq !== null ? { seq: r.seq as number } : {}),
       v: r.v as number,
       ts: r.ts as number,
       actor: r.actor as string,

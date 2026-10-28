@@ -429,8 +429,10 @@ function shift(doc: Doc, sh: Sheet, axis: Axis, at: number, n: number): Map<stri
  * Rewrite `op` (made without seeing `prior`) so it means the same thing after `prior`
  * was applied. Only structural ops move coordinates; everything else passes through.
  * Returns null when the op no longer has a target (its cells or sheet were deleted).
+ * Two inserts at the same index: the one the server ordered first stays put, so pass
+ * priorFirst=false when moving an earlier-ordered op past a later one.
  */
-export function transform(op: Op, prior: Op, doc?: Doc): Op | null {
+export function transform(op: Op, prior: Op, doc?: Doc, priorFirst = true): Op | null {
   if (prior.t === "deleteSheet") return "s" in op && op.s === prior.s ? null : op;
   if (prior.t !== "insert" && prior.t !== "delete") return op;
   if (!("s" in op) || op.t === "renameSheet" || op.t === "moveSheet" || op.t === "deleteSheet") return op;
@@ -474,7 +476,7 @@ export function transform(op: Op, prior: Op, doc?: Doc): Op | null {
     case "delete": {
       if (!sameSheet || op.axis !== axis) return op;
       if (op.t === "insert") {
-        const i = op.at > at || (op.at === at && n > 0) ? shiftIndex(op.at, at, n) : op.at;
+        const i = op.at > at || (op.at === at && n > 0 && priorFirst) ? shiftIndex(op.at, at, n) : op.at;
         return { ...op, at: i ?? at };
       }
       const g = shiftSpan(op.at, op.at + op.n - 1, at, n);
@@ -513,11 +515,11 @@ export function transform(op: Op, prior: Op, doc?: Doc): Op | null {
   }
 }
 
-export function transformAll(ops: Op[], prior: Op[], doc?: Doc): Op[] {
+export function transformAll(ops: Op[], prior: Op[], doc?: Doc, priorFirst = true): Op[] {
   let out = ops;
   for (const p of prior) {
     out = out.flatMap((op) => {
-      const t = transform(op, p, doc);
+      const t = transform(op, p, doc, priorFirst);
       return t ? [t] : [];
     });
   }

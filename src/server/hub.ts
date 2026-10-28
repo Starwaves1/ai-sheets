@@ -118,7 +118,8 @@ export class Hub {
       const changes = store.changesSince(row.id, row.snapVersion);
       for (const c of changes) wb.apply(c.ops);
       const lb = new LiveBook(row.id, wb, row.version, row.created, row.updated, row.snapVersion);
-      lb.recent = changes.slice(-RECENT);
+      // Keep recent history (even if already in the snapshot) for transforms and resend dedupe.
+      lb.recent = store.changesSince(row.id, Math.max(0, row.version - RECENT));
       this.books.set(row.id, lb);
     }
   }

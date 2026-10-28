@@ -215,3 +215,13 @@ test("ROUNDUP rounds tiny positive numbers up", () => {
   assert.equal(val(wb, "A2"), 3);
   assert.equal(val(wb, "A3"), 3);
 });
+
+test("rebase tie-break: the op the server ordered first keeps its index", () => {
+  const r: Op = { t: "insert", s: "s1", axis: "row", at: 2, n: 1 }; // remote, ordered first
+  const p1: Op = { t: "insert", s: "s1", axis: "row", at: 2, n: 1 }; // local, ordered after
+  const p2: Op = { t: "set", s: "s1", cells: [[2, 0, "mine"]] }; // into p1's new row
+  assert.deepEqual(transform(p1, r), { ...p1, at: 3 });
+  const r2 = transform(r, p1, undefined, false)!;
+  assert.equal((r2 as { at: number }).at, 2);
+  assert.deepEqual(transform(p2, r2), { t: "set", s: "s1", cells: [[3, 0, "mine"]] });
+});

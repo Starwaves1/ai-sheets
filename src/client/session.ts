@@ -75,7 +75,12 @@ export class Session {
       es.close();
       this.setStatus("deleted");
     });
-    es.onerror = () => this.setStatus(es.readyState === EventSource.CLOSED ? "offline" : "connecting");
+    es.onerror = () => {
+      if (es.readyState !== EventSource.CLOSED) return this.setStatus("connecting");
+      // The browser gave up (e.g. a proxy error page); keep trying, since saving waits on this stream.
+      this.setStatus("offline");
+      setTimeout(() => this.es === es && this.connect(), 3000);
+    };
   }
 
   close(): void {
@@ -194,8 +199,8 @@ export class Session {
     this.version = c.v;
     if (c.client === this.client) {
       // Our own change, acknowledged in order: send the next one.
-      const i = this.pending.findIndex((p) => (c.seq !== undefined ? p.seq === c.seq : p.sent));
-      if (i >= 0) this.pending.splice(i, 1);
+      // Sends wait for this echo, so it is always the oldest pending change.
+      this.pending.shift();
       this.flush();
       return;
     }
@@ -215,7 +220,7 @@ export class Session {
     for (const p of this.pending) {
       const before = p.ops;
       p.ops = transformAll(before, remote, this.wb.doc);
-      remote = transformAll(remote, before, this.wb.doc);
+      remote = transformAll(remote, before, this.wb.doc, false); // remote was ordered first
       try {
         p.inverse = this.wb.apply(p.ops).inverse;
       } catch {
