@@ -161,7 +161,11 @@ code { font: 12.5px var(--mono); background: var(--hover); padding: 1px 5px; bor
 .live.offline::before, .live.deleted::before { background: var(--err); }
 
 /* ---- workbook layout ---- */
-.book { display: flex; flex-direction: column; height: 100vh; }
+.book {
+  display: flex; flex-direction: column; height: 100vh; height: 100dvh;
+  padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
+}
+body:has(.book) { overflow: hidden; }
 .toolbar {
   display: flex; align-items: center; gap: 2px; flex-wrap: wrap;
   margin: 0 8px; padding: 4px 6px; min-height: 40px;
@@ -233,7 +237,10 @@ code { font: 12.5px var(--mono); background: var(--hover); padding: 1px 5px; bor
 
 /* ---- grid ---- */
 .grid { position: relative; flex: 1; min-width: 0; overflow: hidden; background: var(--paper); contain: strict; }
-.scroller { position: absolute; inset: 0; overflow: scroll; outline: none; scrollbar-color: var(--rule-3) transparent; }
+.scroller { position: absolute; inset: 0; overflow: scroll; outline: none; scrollbar-color: var(--rule-3) transparent; touch-action: manipulation; }
+.grid { -webkit-touch-callout: none; -webkit-user-select: none; user-select: none; }
+.sel-handle { position: absolute; left: 0; top: 0; width: 32px; height: 32px; margin: -16px 0 0 -16px; z-index: 7; touch-action: none; display: none; }
+.sel-handle::after { content: ""; position: absolute; left: 10px; top: 10px; width: 12px; height: 12px; border-radius: 50%; background: var(--accent); box-shadow: 0 0 0 2px var(--paper); }
 .sizer { pointer-events: none; }
 .layer { position: absolute; inset: 0; pointer-events: none; overflow: hidden; }
 .pane { position: absolute; overflow: hidden; }
@@ -422,8 +429,64 @@ code { font: 12.5px var(--mono); background: var(--hover); padding: 1px 5px; bor
 .missing h1 { font-size: 22px; margin: 0 0 8px; }
 .missing p { color: var(--ink-2); }
 
+/* ---- touch and small screens ---- */
+@media (pointer: coarse) {
+  .sel-handle { display: block; }
+  .toolbar { flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none; }
+  .toolbar::-webkit-scrollbar { display: none; }
+  .tool { flex: none; }
+  .tool { min-width: 40px; height: 40px; }
+  .icon-btn { width: 40px; height: 40px; }
+  .btn { height: 40px; }
+  .tab, .tab-input { height: 36px; }
+  .menu .item, .filter-pop .item { height: 40px; }
+  .filter-pop .values label { padding: 8px 6px; }
+  /* 16px keeps iOS from zooming in when a field gets focus. */
+  input, select, textarea, .formula, .addr, .title, .editor { font-size: 16px; }
+  .editor { line-height: 20px; }
+  .menu kbd { display: none; }
+}
+/* Phones, portrait or landscape. */
+@media (max-width: 700px), (max-height: 500px) {
+  .bar { height: 44px; padding: 0 6px 0 10px; gap: 6px; }
+  .book .mark { font-size: 0; gap: 0; }
+  .book .spacer { display: none; }
+  .title { flex: 1; min-width: 0; max-width: none; field-sizing: fixed; }
+  .toolbar {
+    flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none;
+    margin: 0; padding: 2px 4px; border-radius: 0; border-left: 0; border-right: 0;
+  }
+  .toolbar::-webkit-scrollbar { display: none; }
+  .tool { flex: none; }
+  .fbar, .work { margin: 0; border-left: 0; border-right: 0; }
+  .fbar { height: 40px; }
+  .addr { width: 64px; padding: 0 6px; }
+  .stats { display: none; }
+  .foot { padding: 0 4px 2px; }
+  .panel-host:not(:empty) {
+    position: fixed; left: 0; right: 0; bottom: 0; z-index: 50;
+    border-radius: 12px 12px 0 0; overflow: hidden; box-shadow: var(--pop-shadow);
+  }
+  .panel { width: auto; height: auto; max-height: 70dvh; border-left: 0; padding-bottom: calc(14px + env(safe-area-inset-bottom)); }
+  .toast { bottom: calc(52px + env(safe-area-inset-bottom)); max-width: calc(100vw - 24px); }
+  .home .bar { height: 56px; padding: 0 12px; gap: 8px; }
+  .home .btn { padding: 0 10px; }
+  .home main { padding: 4px 12px calc(32px + env(safe-area-inset-bottom)); }
+}
+/* Landscape phones: the toolbar moves up next to the title so the grid keeps its height. */
+@media (max-height: 500px) {
+  .book { display: grid; grid-template-columns: auto minmax(0, 1fr); grid-template-rows: auto auto minmax(0, 1fr) auto; }
+  .book > .bar { max-width: 34vw; }
+  .book > .toolbar { border-top: 0; }
+  .book > .fbar, .book > .work, .book > .foot { grid-column: 1 / -1; }
+  .book .live { font-size: 0; gap: 0; }
+  .fbar { height: 34px; }
+  .foot { height: 34px; }
+}
 @media (max-width: 760px) {
   .list-head { display: none; }
-  .book-link { grid-template-columns: 1fr; gap: 2px; }
+  .book-link { grid-template-columns: minmax(0, 1fr) auto; gap: 2px 12px; }
+  .book-link .name { grid-column: 1 / -1; }
+  .book-link .size { display: none; }
   .activity { display: none; }
 }

@@ -64,7 +64,7 @@ class BookPage {
     this.grid = new Grid(wb, {
       select: () => this.onSelect(),
       edit: (initial) => this.startEdit(initial, initial === null ? false : true),
-      menu: (e, kind) => this.contextMenu(e, kind),
+      menu: (x, y, kind) => this.contextMenu(x, y, kind),
       filterMenu: (col, x, y) => this.openFilter(col, x, y),
       resize: (axis, idx, size) => this.submit([{ t: "size", s: this.sheet.id, axis, sizes: idx.map((i) => [i, size]) }]),
       unhide: (axis, idx) => this.submit([{ t: "hide", s: this.sheet.id, axis, idx, hidden: false }]),
@@ -136,6 +136,7 @@ class BookPage {
       this.toast));
 
     this.bindKeys();
+    this.followKeyboard();
     session.onChange = (e) => this.onChange(e);
     session.onStatus = (s) => {
       this.live.className = `live ${s}`;
@@ -157,6 +158,27 @@ class BookPage {
     window.addEventListener("beforeunload", (e) => {
       if (session.hasPending) e.preventDefault();
     });
+  }
+
+  /**
+   * Phones: the on-screen keyboard covers the bottom of the page without resizing it.
+   * Shrink the app to the visible area so the formula bar and the edited cell stay in view.
+   */
+  private followKeyboard(): void {
+    const vv = window.visualViewport;
+    if (!vv) return;
+    const book = this.root.firstElementChild as HTMLElement;
+    const fit = () => {
+      const covered = vv.height < document.documentElement.clientHeight - 40;
+      book.style.height = covered ? `${vv.height}px` : "";
+      book.style.transform = covered && vv.offsetTop ? `translateY(${vv.offsetTop}px)` : "";
+      if (this.editing) {
+        this.grid.scrollIntoView(this.editing.pos);
+        this.grid.render();
+      }
+    };
+    vv.addEventListener("resize", fit);
+    vv.addEventListener("scroll", fit);
   }
 
   private initialSheet(): Sheet {
@@ -718,7 +740,7 @@ class BookPage {
 
   // ---- rows / columns ----------------------------------------------------------------------------
 
-  private contextMenu(e: MouseEvent, kind: "cell" | "col" | "row"): void {
+  private contextMenu(x: number, y: number, kind: "cell" | "col" | "row"): void {
     const g = this.grid;
     const r = g.rect;
     const s = this.sheet;
@@ -750,7 +772,8 @@ class BookPage {
       items.push(
         { label: "Cut", hint: `${MOD}X`, run: () => { g.focusGrid(); document.execCommand("cut"); } },
         { label: "Copy", hint: `${MOD}C`, run: () => { g.focusGrid(); document.execCommand("copy"); } },
-        { label: "Paste", hint: `${MOD}V`, disabled: true },
+        // Paste needs the keyboard shortcut (browsers block menu paste on plain HTTP); hide it on touch screens.
+        ...(matchMedia("(pointer: coarse)").matches ? [] : [{ label: "Paste", hint: `${MOD}V`, disabled: true }]),
         "-",
       );
     }
@@ -795,7 +818,7 @@ class BookPage {
         { label: "Clear formatting", run: () => this.clearSelection(true) },
       );
     }
-    menu(items, e.clientX, e.clientY);
+    menu(items, x, y);
   }
 
   // ---- sort & filter ---------------------------------------------------------------------------

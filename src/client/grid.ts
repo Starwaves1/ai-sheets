@@ -27,7 +27,7 @@ export interface DisplayRect {
 export interface GridEvents {
   select(): void;
   edit(initial: string | null): void;
-  menu(e: MouseEvent, kind: "cell" | "col" | "row"): void;
+  menu(x: number, y: number, kind: "cell" | "col" | "row"): void;
   filterMenu(col: number, x: number, y: number): void;
   resize(axis: "row" | "col", indices: number[], size: number | null): void;
   unhide(axis: "row" | "col", indices: number[]): void;
@@ -70,6 +70,7 @@ export class Grid {
   private frozenLineV: HTMLElement;
   private frozenLineH: HTMLElement;
   private guide: HTMLElement;
+  private handle: HTMLElement; // touch: drag to extend the selection
 
   sheet!: Sheet;
   rows: number[] = [];
@@ -110,17 +111,20 @@ export class Grid {
     this.frozenLineV = h("div", { class: "frozen-line v" });
     this.frozenLineH = h("div", { class: "frozen-line h" });
     this.guide = h("div", { class: "resize-guide", hidden: true });
+    this.handle = h("div", { class: "sel-handle", "aria-hidden": "true" });
     const layer = h("div", { class: "layer" },
       ...this.panes.map((p) => p.clip), ...this.colHeads.map((x) => x.clip), ...this.rowHeads.map((x) => x.clip),
       corner, this.frozenLineV, this.frozenLineH, this.guide);
-    this.root = h("div", { class: "grid" }, this.scroller, layer);
+    this.root = h("div", { class: "grid" }, this.scroller, layer, this.handle);
 
     this.scroller.addEventListener("scroll", () => this.render(), { passive: true });
     this.scroller.addEventListener("mousedown", (e) => this.mouseDown(e));
     this.scroller.addEventListener("dblclick", (e) => this.dblClick(e));
     this.scroller.addEventListener("contextmenu", (e) => this.contextMenu(e));
     this.scroller.addEventListener("mousemove", (e) => this.hover(e));
-    new ResizeObserver(() => this.render()).observe(this.scroller);
+    // Frozen-pane limits depend on the viewport, so a resize re-lays out.
+    new ResizeObserver(() => this.sheet && this.layout()).observe(this.scroller);
+    this.bindTouch();
   }
 
   focusGrid(): void {
@@ -170,6 +174,12 @@ export class Grid {
     while (this.fr < this.rows.length && this.rows[this.fr]! < s.frozenRows) this.fr++;
     this.fc = 0;
     while (this.fc < this.cols.length && this.cols[this.fc]! < s.frozenCols) this.fc++;
+    // Frozen panes never take more than a share of the screen (a phone would otherwise show
+    // nothing but the frozen name column): shrink frozen sizes proportionally to fit.
+    const W = this.scroller.clientWidth - HEAD_W, H = this.scroller.clientHeight - HEAD_H;
+    const small = W < 700;
+    fitPrefix(this.colLeft, this.fc, Math.max(60, W * (small ? 0.42 : 0.5)));
+    fitPrefix(this.rowTop, this.fr, Math.max(48, H * (small ? 0.25 : 0.4)));
     this.sizer.style.width = `${HEAD_W + this.colLeft[this.cols.length]! + 120}px`;
     this.sizer.style.height = `${HEAD_H + this.rowTop[this.rows.length]! + 200}px`;
     for (const p of this.panes) {
@@ -224,7 +234,7 @@ export class Grid {
     };
   }
 
-  private hit(e: MouseEvent): { zone: "corner" | "col" | "row" | "cell"; i: number; j: number; x: number; y: number; sx: number; sy: number } {
+  private hit(e: { clientX: number; clientY: number }): { zone: "corner" | "col" | "row" | "cell"; i: number; j: number; x: number; y: number; sx: number; sy: number } {
     const box = this.root.getBoundingClientRect();
     const x = e.clientX - box.left, y = e.clientY - box.top;
     const fw = this.colLeft[this.fc]!, fh = this.rowTop[this.fr]!;
@@ -336,6 +346,7 @@ export class Grid {
     this.frozenLineV.style.left = `${HEAD_W + fw - 1}px`;
     this.frozenLineH.hidden = this.fr === 0;
     this.frozenLineH.style.top = `${HEAD_H + fh - 1}px`;
+    this.placeHandle(W, H);
     this.onPaint?.();
   }
 
@@ -647,8 +658,116 @@ export class Grid {
 
   private contextMenu(e: MouseEvent): void {
     e.preventDefault();
+    if (performance.now() - this.lastLongPress < 1000) return; // Android also fires this after our long-press
     const t = this.hit(e);
-    this.ev.menu(e, t.zone === "col" ? "col" : t.zone === "row" ? "row" : "cell");
+    this.ev.menu(e.clientX, e.clientY, t.zone === "col" ? "col" : t.zone === "row" ? "row" : "cell");
+  }
+
+  // ---- touch ------------------------------------------------------------------------
+  // One-finger panning stays native (passive listeners). A tap selects, tapping the
+  // selected cell edits, a long press opens the menu, and the corner handle extends
+  // the selection. The only timer is the long-press one, alive while a finger is down.
+
+  private lastLongPress = 0;
+
+  private bindTouch(): void {
+    const sc = this.scroller;
+    let start: { x: number; y: number } | null = null;
+    let moved = false, long = false, timer = 0;
+    sc.addEventListener("touchstart", (e) => {
+      clearTimeout(timer);
+      start = null;
+      if (e.touches.length !== 1) return;
+      const p = e.touches[0]!;
+      const s = (start = { x: p.clientX, y: p.clientY });
+      moved = long = false;
+      timer = window.setTimeout(() => {
+        if (moved || start !== s) return;
+        long = true;
+        this.lastLongPress = performance.now();
+        this.longPress(s.x, s.y);
+      }, 500);
+    }, { passive: true });
+    sc.addEventListener("touchmove", (e) => {
+      const p = e.touches[0];
+      if (start && p && Math.hypot(p.clientX - start.x, p.clientY - start.y) > 10) {
+        moved = true;
+        clearTimeout(timer);
+      }
+    }, { passive: true });
+    sc.addEventListener("touchend", (e) => {
+      clearTimeout(timer);
+      const s = start;
+      start = null;
+      if (!s || moved) return;
+      e.preventDefault(); // no synthetic mouse events or click after our own handling
+      if (!long) this.tap(s.x, s.y);
+    }, { passive: false });
+    sc.addEventListener("touchcancel", () => {
+      clearTimeout(timer);
+      start = null;
+    });
+
+    // Selection handle: its own element with touch-action: none, so dragging it never scrolls.
+    this.handle.addEventListener("pointerdown", (e) => {
+      e.preventDefault();
+      this.handle.setPointerCapture(e.pointerId);
+      const move = (ev: PointerEvent) => {
+        const m = this.hit(ev);
+        const W = this.scroller.clientWidth, H = this.scroller.clientHeight;
+        if (m.x > W - 16) this.scroller.scrollLeft += 24;
+        if (m.y > H - 16) this.scroller.scrollTop += 24;
+        this.select(this.anchor, this.dataOf(m.i, m.j), false);
+      };
+      const up = () => {
+        this.handle.removeEventListener("pointermove", move);
+        this.handle.removeEventListener("pointerup", up);
+        this.handle.removeEventListener("pointercancel", up);
+      };
+      this.handle.addEventListener("pointermove", move);
+      this.handle.addEventListener("pointerup", up);
+      this.handle.addEventListener("pointercancel", up);
+    });
+  }
+
+  private tap(x: number, y: number): void {
+    const t = this.hit({ clientX: x, clientY: y });
+    const r = this.rect;
+    const a = this.displayOf(this.anchor);
+    const onActive = t.zone === "cell" && r.i1 === r.i2 && r.j1 === r.j2 && a.i === t.i && a.j === t.j;
+    this.focusGrid(); // also commits an open editor (it blurs)
+    const last = { i: this.rows.length - 1, j: this.cols.length - 1 };
+    if (t.zone === "corner") return this.selectDisplay(0, 0, last.i, last.j, false);
+    if (t.zone === "col") return this.selectDisplay(0, t.j, last.i, t.j, false);
+    if (t.zone === "row") return this.selectDisplay(t.i, 0, t.i, last.j, false);
+    const view = this.sheet.view;
+    if (view && this.rows[t.i] === view.headerRow && this.colLeft[t.j + 1]! - t.sx < 28) {
+      this.selectDisplay(t.i, t.j, t.i, t.j, false);
+      return this.ev.filterMenu(this.cols[t.j]!, x - 120, y + 12);
+    }
+    if (onActive) return this.ev.edit(null);
+    this.selectDisplay(t.i, t.j, t.i, t.j, false);
+  }
+
+  private longPress(x: number, y: number): void {
+    const t = this.hit({ clientX: x, clientY: y });
+    const r = this.rect;
+    const last = { i: this.rows.length - 1, j: this.cols.length - 1 };
+    const inside = t.i >= r.i1 && t.i <= r.i2 && t.j >= r.j1 && t.j <= r.j2;
+    if (t.zone === "col" && !(inside && r.i1 === 0 && r.i2 === last.i)) this.selectDisplay(0, t.j, last.i, t.j, false);
+    else if (t.zone === "row" && !(inside && r.j1 === 0 && r.j2 === last.j)) this.selectDisplay(t.i, 0, t.i, last.j, false);
+    else if (t.zone === "cell" && !inside) this.selectDisplay(t.i, t.j, t.i, t.j, false);
+    this.ev.menu(x, y, t.zone === "col" ? "col" : t.zone === "row" ? "row" : "cell");
+  }
+
+  /** Put the touch handle on the selection's bottom-right corner, if that corner is on screen. */
+  private placeHandle(W: number, H: number): void {
+    const r = this.rect;
+    const b = this.cellBox(r.i2, r.j2);
+    const x = b.x + b.w, y = b.y + b.h;
+    const ok = x > HEAD_W && y > HEAD_H && x < W && y < H;
+    this.handle.hidden = !ok;
+    if (ok) this.handle.style.transform = `translate(${x}px, ${y}px)`;
   }
 
   /** Width that fits the longest text in a column. */
@@ -667,6 +786,16 @@ export class Grid {
     }
     return Math.min(600, Math.ceil(max));
   }
+}
+
+/** Scale offsets[0..n] so offsets[n] <= max, shifting everything after by the same amount. */
+function fitPrefix(offsets: Float64Array, n: number, max: number): void {
+  const total = offsets[n]!;
+  if (n === 0 || total <= max) return;
+  const k = max / total;
+  for (let i = 1; i <= n; i++) offsets[i] = offsets[i]! * k;
+  const shift = total - max;
+  for (let i = n + 1; i < offsets.length; i++) offsets[i] = offsets[i]! - shift;
 }
 
 function range(a: number, b: number): number[] {

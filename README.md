@@ -9,6 +9,8 @@ A small, self-hosted spreadsheet for a person and their AI agents working on the
 <td><img src="docs/screenshots/live-edit.png" alt="A cell just changed by an agent, highlighted, with the agent named in the top bar"></td>
 </tr></table>
 
+<p><img src="docs/screenshots/phone.png" alt="DeepSWE runs on a phone, frozen panes shrunk to fit" width="260"> <img src="docs/screenshots/phone-panned.png" alt="Panned to the last task columns on a phone" width="260"></p>
+
 ## What it does
 
 - Workbooks with multiple tabs; a virtualized grid that stays smooth with 50k+ cells.
@@ -21,6 +23,7 @@ A small, self-hosted spreadsheet for a person and their AI agents working on the
 - Bold, italic, strikethrough, text and fill colors, alignment, wrap, rotated header text, number formats (`0.00`, `0%`, `#,##0`, `$#,##0.00`, scientific).
 - Conditional fill rules, such as green for 1 and red for 0 in a pass/fail matrix.
 - CSV import and export. Light and dark themes follow the OS; named colors adapt to both.
+- Works on phones and tablets: native one-finger panning, tap to select, tap again to edit, long press for the row/column menu, a handle to drag out a selection. Frozen rows and columns shrink to fit small screens, and the grid stays above the on-screen keyboard.
 
 ## For agents
 
@@ -46,6 +49,7 @@ npm run build
 npm start                 # http://0.0.0.0:8790, data in ./data
 npm test                  # core + API tests
 npm run e2e               # live path, idle cost and 50k-cell scrolling in headless Chromium
+npm run mobile            # emulated phones and an iPad: layout, tap/edit, long press, touch panning
 ```
 
 Settings come from the environment: `SHEETS_PORT` (8790), `SHEETS_HOST` (0.0.0.0), `SHEETS_DATA` (./data), `SHEETS_PUBLIC_URL` (base URL the CLI prints). The CLI reads `SHEETS_URL` (default `http://127.0.0.1:8790`) and `SHEETS_ACTOR` (the name others see). `deploy/sheets.service` is a systemd user unit.

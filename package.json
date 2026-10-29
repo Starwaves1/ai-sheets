@@ -17,7 +17,8 @@
     "typecheck": "tsc --noEmit",
     "test": "node build.mjs --tests && node --disable-warning=ExperimentalWarning --test 'dist/test/*.js'",
     "start": "node --disable-warning=ExperimentalWarning dist/server.js",
-    "e2e": "node build.mjs && node dist/e2e.js"
+    "e2e": "node build.mjs && node dist/e2e.js",
+    "mobile": "node build.mjs && node dist/mobile.js"
   },
   "devDependencies": {
     "@types/node": "^22.20.5",

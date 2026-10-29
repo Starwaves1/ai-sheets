@@ -81,7 +81,7 @@ Raw ops use 0-based row/col indices and sheet ids from the summary, for example 
 
 ## Working on the code
 
-- `npm run build` bundles server, CLI and browser app into `dist/`; `npm test` runs core and API tests; `SHEETS_URL=http://192.168.1.5:8790 npm run e2e` checks the live path and idle cost in headless Chromium.
+- `npm run build` bundles server, CLI and browser app into `dist/`; `npm test` runs core and API tests; `SHEETS_URL=http://192.168.1.5:8790 npm run e2e` checks the live path and idle cost in headless Chromium; `npm run mobile` checks phones and an iPad (touch emulation).
 - The service is the systemd user unit `sheets.service` (`systemctl --user restart sheets` after a build). Data lives in `data/sheets.db` (git-ignored).
 - `src/core` is pure and shared by server and browser: A1 utilities, the document model, ops (apply, inverse, transform), the formula engine, display formats. Add a formula function in `src/core/formula/functions.ts` with a test in `test/core.test.ts`.
 - `src/server` is the HTTP API, SSE fan-out and SQLite op log; `src/client` is the browser app (no framework; `grid.ts` is the virtualized grid).
