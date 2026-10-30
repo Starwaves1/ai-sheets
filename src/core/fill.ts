@@ -6,7 +6,7 @@
 
 import type { Range } from "./a1.ts";
 import { isFormula, moveRefs } from "./formula/rewrite.ts";
-import { key, type CondRule, type Format, type Sheet } from "./model.ts";
+import { key, type CondRule, type Flag, type Format, type Sheet } from "./model.ts";
 import type { Op } from "./ops.ts";
 
 const NUMERIC = /^[+-]?(?:\d+\.?\d*|\.\d+)$/;
@@ -113,6 +113,8 @@ export function autofillOps(
   }
   const cells: Array<[number, number, string | null]> = [];
   const fmts: Array<[number, number, Format | null]> = [];
+  const flags: Array<[number, number, Flag | null]> = [];
+  let flagged = false;
   const at = (line: number, pos: number) => (vertical ? { r: rowAt(pos), c: colAt(line) } : { r: rowAt(line), c: colAt(pos) });
   for (const line of lines) {
     const src = along.map((pos) => at(line, pos));
@@ -124,10 +126,14 @@ export function autofillOps(
       let v = next[k] ?? null;
       if (v !== null && isFormula(v)) v = moveRefs(v, t.r - from.r, t.c - from.c);
       cells.push([t.r, t.c, v]);
-      fmts.push([t.r, t.c, sheet.cells.get(key(from.r, from.c))?.f ?? null]);
+      const cell = sheet.cells.get(key(from.r, from.c));
+      fmts.push([t.r, t.c, cell?.f ?? null]);
+      flags.push([t.r, t.c, cell?.flag ?? null]);
+      if (cell?.flag) flagged = true;
     });
   }
   const ops: Op[] = [{ t: "set", s: sheet.id, cells }, { t: "fmt", s: sheet.id, cells: fmts }];
+  if (flagged) ops.push({ t: "flag", s: sheet.id, cells: flags });
   const cond = growRules(sheet.cond, bbox(cells), bbox(along.flatMap((pos) => lines.map((line) => at(line, pos)))), vertical);
   if (cond) ops.push({ t: "cond", s: sheet.id, rules: cond });
   return ops;

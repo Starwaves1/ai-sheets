@@ -8,7 +8,7 @@ import type { Range } from "./a1.ts";
 import { isFormula, renameSheetRefs, shiftRefs } from "./formula/rewrite.ts";
 import {
   COND_OPS, FORMAT_KEYS, getSheet, key, keyCol, keyRow, OpError, sheetFromJSON, sheetToJSON,
-  type CondRule, type Doc, type Format, type Sheet, type SheetJSON, type ViewState,
+  type CondRule, type Doc, type Flag, type Format, type Sheet, type SheetJSON, type ViewState,
 } from "./model.ts";
 
 export type Axis = "row" | "col";
@@ -17,6 +17,7 @@ export type FormatPatch = { [K in keyof Format]?: Format[K] | null };
 export type Op =
   | { t: "set"; s: string; cells: Array<[number, number, string | null]> }
   | { t: "fmt"; s: string; cells: Array<[number, number, Format | null]> }
+  | { t: "flag"; s: string; cells: Array<[number, number, Flag | null]> }
   | { t: "style"; s: string; range: Range; patch: FormatPatch }
   | { t: "insert"; s: string; axis: Axis; at: number; n: number }
   | { t: "delete"; s: string; axis: Axis; at: number; n: number }
@@ -60,7 +61,7 @@ export function apply(doc: Doc, op: Op): Applied {
         if (v === null || v === "") {
           if (cell) {
             delete cell.v;
-            if (!cell.f) sh.cells.delete(k);
+            if (!cell.f && !cell.flag) sh.cells.delete(k);
           }
         } else {
           if (cell) cell.v = v;
@@ -80,6 +81,24 @@ export function apply(doc: Doc, op: Op): Applied {
         setFormat(sh, r, c, f);
       }
       return { inverse: [{ t: "fmt", s: op.s, cells: old.reverse() }], dirty: [] };
+    }
+    case "flag": {
+      const sh = getSheet(doc, op.s);
+      const old: Array<[number, number, Flag | null]> = [];
+      for (const [r, c, flag] of op.cells) {
+        checkCell(r, c);
+        const k = key(r, c);
+        const cell = sh.cells.get(k);
+        old.push([r, c, cell?.flag ?? null]);
+        if (flag) {
+          if (cell) cell.flag = structuredClone(flag);
+          else sh.cells.set(k, { flag: structuredClone(flag) });
+        } else if (cell) {
+          delete cell.flag;
+          if (cell.v === undefined && !cell.f) sh.cells.delete(k);
+        }
+      }
+      return { inverse: [{ t: "flag", s: op.s, cells: old.reverse() }], dirty: [] };
     }
     case "style": {
       const sh = getSheet(doc, op.s);
@@ -117,10 +136,12 @@ export function apply(doc: Doc, op: Op): Applied {
       };
       const vals: Array<[number, number, string | null]> = [];
       const fmts: Array<[number, number, Format | null]> = [];
+      const flags: Array<[number, number, Flag | null]> = [];
       for (const [k, cell] of sh.cells) {
         if (!inSpan(k)) continue;
         if (cell.v !== undefined) vals.push([keyRow(k), keyCol(k), cell.v]);
         if (cell.f) fmts.push([keyRow(k), keyCol(k), cell.f]);
+        if (cell.flag) flags.push([keyRow(k), keyCol(k), cell.flag]);
       }
       const sizesMap = row ? sh.rowH : sh.colW;
       const hiddenSet = row ? sh.hiddenRows : sh.hiddenCols;
@@ -139,6 +160,7 @@ export function apply(doc: Doc, op: Op): Applied {
       const inverse: Op[] = [{ t: "insert", s: op.s, axis: op.axis, at: op.at, n: op.n }];
       if (vals.length) inverse.push({ t: "set", s: sh.id, cells: vals });
       if (fmts.length) inverse.push({ t: "fmt", s: sh.id, cells: fmts });
+      if (flags.length) inverse.push({ t: "flag", s: sh.id, cells: flags });
       for (const [sid, cells] of changed) inverse.push({ t: "set", s: sid, cells });
       if (sizes.length) inverse.push({ t: "size", s: sh.id, axis: op.axis, sizes });
       if (hidden.length) inverse.push({ t: "hide", s: sh.id, axis: op.axis, idx: hidden, hidden: true });
@@ -316,7 +338,7 @@ function setFormat(sh: Sheet, r: number, c: number, f: Format | null): void {
   if (cell) {
     if (has) cell.f = clean;
     else delete cell.f;
-    if (cell.v === undefined && !cell.f) sh.cells.delete(k);
+    if (cell.v === undefined && !cell.f && !cell.flag) sh.cells.delete(k);
   } else if (has) {
     sh.cells.set(k, { f: clean });
   }
@@ -458,14 +480,15 @@ export function transform(op: Op, prior: Op, doc?: Doc, priorFirst = true): Op |
       }
       return cells.length ? { ...op, cells } : null;
     }
-    case "fmt": {
+    case "fmt":
+    case "flag": {
       if (!sameSheet) return op;
-      const cells: Array<[number, number, Format | null]> = [];
+      const cells: Array<[number, number, never]> = [];
       for (const [r, c, f] of op.cells) {
         const i = shiftIndex(row ? r : c, at, n);
-        if (i !== null) cells.push(row ? [i, c, f] : [r, i, f]);
+        if (i !== null) cells.push(row ? [i, c, f as never] : [r, i, f as never]);
       }
-      return cells.length ? { ...op, cells } : null;
+      return cells.length ? ({ ...op, cells } as Op) : null;
     }
     case "style": {
       if (!sameSheet) return op;
@@ -528,7 +551,7 @@ export function transformAll(ops: Op[], prior: Op[], doc?: Doc, priorFirst = tru
 
 /** Does this op change anything a user would want highlighted? Returns the touched cells. */
 export function touchedCells(op: Op): { s: string; cells: Array<[number, number]> } | null {
-  if (op.t === "set" || op.t === "fmt") return { s: op.s, cells: op.cells.map(([r, c]) => [r, c]) };
+  if (op.t === "set" || op.t === "fmt" || op.t === "flag") return { s: op.s, cells: op.cells.map(([r, c]) => [r, c]) };
   if (op.t === "style") {
     const out: Array<[number, number]> = [];
     const g = op.range;

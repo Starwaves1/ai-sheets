@@ -36,6 +36,15 @@ export function describeOp(op: Op, sheetName: (id: string) => string, verbose = 
       const b = bounds(op.cells);
       return b ? `formatted ${where(op.s)}${rangeName(b)}` : "formatted nothing";
     }
+    case "flag": {
+      const b = bounds(op.cells);
+      if (!b) return "flagged nothing";
+      const at = `${where(op.s)}${rangeName(b)}`;
+      const f = op.cells[0]![2];
+      if (!f) return `removed the flag on ${at}`;
+      if (f.done) return `resolved the flag on ${at}${f.done.reply ? `: ${JSON.stringify(f.done.reply)}` : ""}`;
+      return `flagged ${at}: ${JSON.stringify(f.note)}`;
+    }
     case "style": return `formatted ${where(op.s)}${rangeName(op.range)} ${JSON.stringify(op.patch)}`;
     case "insert": return `inserted ${span(op.axis, op.at, op.n)} in ${sheetName(op.s)}`;
     case "delete": return `deleted ${span(op.axis, op.at, op.n)} in ${sheetName(op.s)}`;

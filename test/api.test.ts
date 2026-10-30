@@ -142,3 +142,22 @@ test("CSV import and the CLI agent path", async () => {
   const csv = (await cli("export", "runs")).stdout;
   assert.equal(csv, "name,pass,score\nalpha,1,10\nbeta,0,0\n");
 });
+
+test("flags: listed across workbooks with the current value, resolved with a reply", async () => {
+  const b = await req("POST", "/api/books", { name: "Flagged" });
+  const sid = b.data.sheets[0].id;
+  await req("PUT", "/api/books/Flagged/range?ref=A1", { values: [["x", "=1+1"]] });
+  const flag = { note: "why 2?", by: "Garrett", ts: 1000 };
+  await req("POST", "/api/books/Flagged/ops", { ops: [{ t: "flag", s: sid, cells: [[0, 1, flag]] }] });
+  let all = await req("GET", "/api/flags");
+  const mine = all.data.filter((f: any) => f.book === "Flagged");
+  assert.equal(mine.length, 1);
+  assert.equal(mine[0].ref, "Sheet1!B1");
+  assert.equal(mine[0].value, "2");
+  assert.equal(mine[0].input, "=1+1");
+  await req("POST", "/api/books/Flagged/ops", { ops: [{ t: "flag", s: sid, cells: [[0, 1, { ...flag, done: { by: "claude", ts: 2000, reply: "1+1" } }]] }] });
+  all = await req("GET", "/api/flags");
+  assert.equal(all.data.filter((f: any) => f.book === "Flagged").length, 0);
+  const done = await req("GET", "/api/books/Flagged/flags?all=1");
+  assert.equal(done.data[0].done.reply, "1+1");
+});

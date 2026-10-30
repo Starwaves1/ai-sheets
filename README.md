@@ -11,6 +11,11 @@ A small, self-hosted spreadsheet for a person and their AI agents working on the
 
 <p><img src="docs/screenshots/phone.png" alt="DeepSWE runs on a phone, frozen panes shrunk to fit" width="260"> <img src="docs/screenshots/phone-panned.png" alt="Panned to the last task columns on a phone" width="260"></p>
 
+<table><tr>
+<td><img src="docs/screenshots/flag-card.png" alt="A cell flagged for Claude with a note"></td>
+<td><img src="docs/screenshots/flags-panel-dark.png" alt="The Flags panel: one open flag, one resolved with Claude's reply"></td>
+</tr></table>
+
 ## What it does
 
 - Workbooks with multiple tabs; a virtualized grid that stays smooth with 50k+ cells.
@@ -22,6 +27,8 @@ A small, self-hosted spreadsheet for a person and their AI agents working on the
 - Insert and delete rows and columns (formulas everywhere are rewritten), resize, hide and unhide, freeze rows and columns.
 - Sort and filter as a shared, persisted view that never moves stored data.
 - Bold, italic, strikethrough, text and fill colors, alignment, wrap, rotated header text, number formats (`0.00`, `0%`, `#,##0`, `$#,##0.00`, scientific).
+- Flags for Claude: select cells, press the orange tag, write what an agent should look at. Agents list them with `sheets flags` and resolve them with a reply that stays on the cell until you dismiss it.
+- Your name (set once per browser in the top bar) is shown on your edits and flags.
 - Conditional fill rules, such as green for 1 and red for 0 in a pass/fail matrix.
 - CSV import and export. Light and dark themes follow the OS; named colors adapt to both.
 - Works on phones and tablets: native one-finger panning, tap to select, tap again to edit, long press for the row/column menu, a handle to drag out a selection. Frozen rows and columns shrink to fit small screens, and the grid stays above the on-screen keyboard.
@@ -35,6 +42,8 @@ sheets set budget B4 '=SUM(B2:B3)'
 sheets set budget A10 --csv rows.csv
 sheets format runs S2:BP19 --align center
 sheets cond runs add S2:BP19 eq 1 --fill green
+sheets flags                      # what Garrett flagged for you
+sheets resolve runs M5 "checked: 0.44 after the rerun"
 sheets watch runs
 ```
 

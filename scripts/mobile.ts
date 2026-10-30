@@ -113,6 +113,27 @@ try {
     if (shots && name === "iphone-15") await page.screenshot({ path: join(shots, `mobile-menu-${name}.png`) });
     await page.keyboard.press("Escape");
 
+    // Flags on touch: tapping a flagged cell shows its note; the long-press menu offers "Flag for Claude…".
+    await cli("flag", scratch.id, "B3", "is 5 kiwis right?");
+    await page.waitForTimeout(400);
+    const five = await cellAt(page, "5");
+    await page.touchscreen.tap(five!.x, five!.y);
+    await page.waitForTimeout(200);
+    const card = await page.evaluate(() => {
+      const el = document.querySelector(".flag-card") as HTMLElement | null;
+      if (!el) return null;
+      const r = el.getBoundingClientRect();
+      return { note: el.querySelector(".note")?.textContent, inside: r.left >= 0 && r.right <= window.innerWidth };
+    });
+    check(card?.note === "is 5 kiwis right?" && card.inside, `${name}: tapping a flagged cell shows its note on screen`, JSON.stringify(card));
+    if (shots && name === "iphone-15") await page.screenshot({ path: join(shots, `mobile-flag-${name}.png`) });
+    await page.waitForTimeout(1000);
+    await cdpLongPress(page, five!.x, five!.y);
+    const flagItem = await page.locator(".menu .item", { hasText: "Edit flag…" }).count();
+    check(flagItem === 1, `${name}: long-press menu offers the flag`);
+    await page.keyboard.press("Escape");
+    await cli("flag", scratch.id, "B3", "--remove");
+
     // Autofill on touch: select C2:C6 with 1, 2 at the top, long-press inside, choose "Autofill down".
     if (name === "iphone-15" || name === "ipad") {
       await page.waitForTimeout(1000); // the menu ignores a contextmenu within 1 s of a long press

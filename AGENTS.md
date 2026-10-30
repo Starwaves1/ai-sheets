@@ -2,7 +2,19 @@
 
 A self-hosted spreadsheet at http://192.168.1.5:8790/. Garrett keeps workbooks open in a browser; anything you write shows up in his tab within a second, highlighted, with your name in the activity line. Use the `sheets` CLI (on PATH, source in `src/cli/main.ts`). Run `sheets help` for every flag.
 
-## Read
+## Flags: what Garrett wants you to look at
+
+Garrett marks cells in the browser with the orange tag ("flag for Claude") and a note, then tells you "check my flags". It is an async note on a cell, not a chat. Work through them like this:
+
+```sh
+sheets flags                               # every open flag, all workbooks: book, cell, value, note, who, when
+sheets get "DeepSWE runs" 'Runs!M2:O19'    # look at the cells and their neighbours
+sheets resolve "DeepSWE runs" 'Runs!M5' "Rerun on the fixed kernel: 0.44, updated M5."
+sheets flags --all                         # resolved ones too, with replies
+```
+
+`resolve` marks the flag done and attaches your reply. Both stay on the cell (green marker) until Garrett dismisses them, so say what you found or changed in one or two sentences. You can leave a flag for him too: `sheets flag <book> B4 "note"` (`--remove` takes one off). Flags live on the cells: they move with inserted or deleted rows, copy and paste, and fill.
+
 
 ```sh
 sheets ls                                  # id, name, tabs with used range, version, last edit

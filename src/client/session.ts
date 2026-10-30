@@ -6,6 +6,7 @@
 import type { DocJSON } from "../core/model.ts";
 import { touchedCells, transformAll, type Op } from "../core/ops.ts";
 import { Workbook } from "../core/workbook.ts";
+import { myName } from "./flags.ts";
 
 interface Change {
   v: number;
@@ -171,7 +172,7 @@ export class Session {
     try {
       const res = await fetch(`/api/books/${encodeURIComponent(this.bookId)}/ops`, {
         method: "POST",
-        headers: { "content-type": "application/json" },
+        headers: { "content-type": "application/json", ...(myName() ? { "x-actor": encodeURIComponent(myName()) } : {}) },
         body: JSON.stringify({ ops: next.ops, base: this.version, client: this.client, seq: next.seq }),
       });
       if (res.ok) return; // acknowledged through the event stream

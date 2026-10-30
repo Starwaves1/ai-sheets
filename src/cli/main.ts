@@ -5,6 +5,7 @@ import { colName, parseRange, rangeName, MAX_COLS, MAX_ROWS, type SheetRange } f
 import { parseDelimited } from "../core/csv.ts";
 import { describeOp } from "../core/describe.ts";
 import { autofillOps } from "../core/fill.ts";
+import { groupAt } from "../core/flags.ts";
 import { COND_OPS, sheetFromJSON, type CondOp, type CondRule, type SheetJSON, type ViewState } from "../core/model.ts";
 import type { FormatPatch, Op } from "../core/ops.ts";
 
@@ -38,7 +39,7 @@ interface Args {
   flags: Map<string, string | true>;
 }
 
-const BOOL_FLAGS = new Set(["csv", "tsv", "json", "formulas", "desc", "bold", "no-bold", "italic", "no-italic", "strike", "no-strike", "wrap", "no-wrap", "rotate", "no-rotate", "reset", "formats", "copy", "clear", "off", "yes", "help", "values"]);
+const BOOL_FLAGS = new Set(["csv", "tsv", "json", "formulas", "desc", "bold", "no-bold", "italic", "no-italic", "strike", "no-strike", "wrap", "no-wrap", "rotate", "no-rotate", "reset", "formats", "copy", "clear", "all", "remove", "off", "yes", "help", "values"]);
 
 function parseArgs(argv: string[]): Args {
   const pos: string[] = [];
@@ -170,6 +171,9 @@ const HELP = `sheets: read and edit workbooks on the sheets server (${SERVER})
   sheets new <name>  |  sheets rename <book> <name>  |  sheets rm <book> --yes
   sheets import <file.csv|-> [--name N] [--book B [--sheet S]]
   sheets export <book> [sheet] [-o file]
+  sheets flags [book] [--all]                 flags people left for you, across all workbooks (--all: resolved too)
+  sheets flag <book> <range> "note"           flag cells for someone to look at (--remove to take it off)
+  sheets resolve <book> <cell> ["reply"]      mark a flag done; the reply shows on it until they dismiss it
   sheets watch <book>                         print changes as they happen
   sheets ops <book> '<json ops>'              raw ops (see AGENTS.md)
 
@@ -398,6 +402,40 @@ async function main(argv: string[]): Promise<void> {
       return;
     }
     case "watch": return watch(rest);
+    case "flags": return flags(a, rest);
+    case "flag": {
+      need(2, 'flag <book> <range> "note" | flag <book> <range> --remove');
+      const b = await info(rest[0]!);
+      const { sheet, range } = rangeArg(b, rest[1]!);
+      const g = { r1: range.r1, c1: range.c1, r2: Math.min(range.r2, sheet.rows - 1), c2: Math.min(range.c2, sheet.cols - 1) };
+      if ((g.r2 - g.r1 + 1) * (g.c2 - g.c1 + 1) > 10_000) throw new CliError("flag at most 10000 cells at once");
+      const note = rest.slice(2).join(" ").trim();
+      const remove = a.flags.has("remove");
+      if (!remove && !note) throw new CliError('give a note: sheets flag <book> <range> "what to look at"');
+      const flag = remove ? null : { note, by: ACTOR, ts: Date.now() };
+      const cells: Array<[number, number, typeof flag]> = [];
+      for (let r = g.r1; r <= g.r2; r++) for (let c = g.c1; c <= g.c2; c++) cells.push([r, c, flag]);
+      const v = await ops(b, [{ t: "flag", s: sheet.id, cells }]);
+      console.log(`${remove ? "removed flags on" : "flagged"} ${sheet.name}!${rangeName(g)} (v${v})`);
+      return;
+    }
+    case "resolve": {
+      need(2, 'resolve <book> <cell> ["reply"]');
+      const b = await info(rest[0]!);
+      const { sheet, range } = rangeArg(b, rest[1]!);
+      const doc = await api<{ doc: { sheets: SheetJSON[] } }>("GET", `/api/books/${enc(b.id)}/doc`);
+      const sh = sheetFromJSON(doc.doc.sheets.find((x) => x.id === sheet.id)!);
+      const here = sh.cells.get(range.r1 * 16384 + range.c1)?.flag;
+      if (!here) throw new CliError(`no flag on ${sheet.name}!${rangeName({ ...range, r2: range.r1, c2: range.c1 })} (sheets flags ${JSON.stringify(b.name)} lists them)`);
+      // Resolve the whole block of cells flagged together with this one.
+      const group = groupAt({ name: b.name, sheets: [sh] }, sh.id, range.r1, range.c1)!;
+      const reply = rest.slice(2).join(" ").trim();
+      const done = { ...here, done: { by: ACTOR, ts: Date.now(), ...(reply ? { reply } : {}) } };
+      const cells = group.cells.map(([r, c]) => [r, c, done] as [number, number, typeof done]);
+      const v = await ops(b, [{ t: "flag", s: sheet.id, cells }]);
+      console.log(`resolved the flag "${here.note}" on ${cells.length} cell${cells.length === 1 ? "" : "s"} (v${v})`);
+      return;
+    }
     default:
       throw new CliError(`unknown command "${cmd}"; run sheets help`);
   }
@@ -506,6 +544,32 @@ async function tab(a: Args, rest: string[]): Promise<void> {
   } else throw new CliError(`unknown tab command "${sub}"`);
   const v = await ops(b, [op]);
   console.log(`${describeOp(op, (id) => b.sheets.find((s) => s.id === id)?.name ?? id)} (v${v})`);
+}
+
+interface FlagRow {
+  book: string; ref: string; cells: number; value: string; input: string; url: string;
+  note: string; by: string; ts: number; done?: { by: string; ts: number; reply?: string };
+}
+
+async function flags(a: Args, rest: string[]): Promise<void> {
+  const all = a.flags.has("all");
+  const list = rest[0]
+    ? (await api<FlagRow[]>("GET", `/api/books/${enc((await info(rest[0])).id)}/flags${all ? "?all=1" : ""}`))
+    : await api<FlagRow[]>("GET", `/api/flags${all ? "?all=1" : ""}`);
+  const open = list.filter((f) => !f.done).length;
+  if (!list.length) return console.log(all ? "no flags" : "no open flags");
+  console.log(`# ${open} open flag${open === 1 ? "" : "s"}${all ? `, ${list.length - open} resolved` : ""}. When done: sheets resolve <book> <cell> "what you did"`);
+  const when = (ts: number) => {
+    const d = new Date(ts);
+    const p = (n: number) => String(n).padStart(2, "0");
+    return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())} (${ago(ts)})`;
+  };
+  for (const f of list) {
+    const value = f.input.startsWith("=") ? `${JSON.stringify(f.value)} from ${f.input}` : JSON.stringify(f.value);
+    const many = f.cells > 1 ? ` (${f.cells} cells, first shown)` : "";
+    console.log(`${f.done ? "[done] " : ""}${f.book}  ${f.ref}  value ${value}${many}\n  note: ${JSON.stringify(f.note)}  by ${f.by}, ${when(f.ts)}` +
+      (f.done ? `\n  resolved by ${f.done.by}, ${when(f.done.ts)}${f.done.reply ? `: ${JSON.stringify(f.done.reply)}` : ""}` : ""));
+  }
 }
 
 async function watch(rest: string[]): Promise<void> {

@@ -49,6 +49,8 @@ export const ICONS = {
   fillColor: '<path d="M3 8.5 7.5 4l4 4-4.5 4.5zM7.5 4 5.5 2" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/><path d="M13 10.5s1.25 1.5 1.25 2.25a1.25 1.25 0 0 1-2.5 0c0-.75 1.25-2.25 1.25-2.25z" fill="currentColor"/>',
 };
 
+export const TAG_ICON = '<path d="M2.5 2.5h5.6l5.4 5.4-5.6 5.6-5.4-5.4z" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/><circle cx="5.4" cy="5.4" r="1.1" fill="currentColor"/>';
+
 export function clearChildren(el: Element): void {
   while (el.firstChild) el.firstChild.remove();
 }

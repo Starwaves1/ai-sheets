@@ -33,6 +33,8 @@ export interface GridEvents {
   unhide(axis: "row" | "col", indices: number[]): void;
   /** A click on a cell while a formula is being typed: return true if it was taken as a reference. */
   pick(p: Pos): boolean;
+  /** The mouse moved onto another cell (null: off the cells). */
+  hoverCell(p: Pos | null): void;
   fill(source: DisplayRect, target: DisplayRect, alt: boolean): void;
 }
 
@@ -140,6 +142,7 @@ export class Grid {
     this.scroller.addEventListener("dblclick", (e) => this.dblClick(e));
     this.scroller.addEventListener("contextmenu", (e) => this.contextMenu(e));
     this.scroller.addEventListener("mousemove", (e) => this.hover(e));
+    this.scroller.addEventListener("mouseleave", () => this.setHover(null));
     // Frozen-pane limits depend on the viewport, so a resize re-lays out.
     new ResizeObserver(() => this.sheet && this.layout()).observe(this.scroller);
     this.bindTouch();
@@ -417,7 +420,9 @@ export class Grid {
         const filterBtn = view && r === view.headerRow && (view.filters[c] !== undefined || view.sort?.col === c || this.inUsedCols(c));
         const flashT = this.flashes.get(k);
         const flashing = flashT !== undefined && now - flashT < FLASH_MS;
-        const cls = cellClass(f, align, v instanceof Err, spill, flashing, filterBtn ? (view!.filters[c] || view!.sort?.col === c ? "filter on" : "filter") : "");
+        const flag = s.cells.get(k)?.flag;
+        const extra = (filterBtn ? (view!.filters[c] || view!.sort?.col === c ? "filter on" : "filter") : "") + (flag ? (flag.done ? " flagged done" : " flagged") : "");
+        const cls = cellClass(f, align, v instanceof Err, spill, flashing, extra.trim());
         const style = cellStyle(f);
         const sig = `${text}\u0001${cls}\u0001${style}\u0001${x},${y},${w},${hgt}`;
         let el = p.cells.get(k);
@@ -538,9 +543,18 @@ export class Grid {
 
   // ---- mouse ---------------------------------------------------------------------------
 
+  private hovered = -1;
+  private setHover(p: Pos | null): void {
+    const k = p ? key(p.r, p.c) : -1;
+    if (k === this.hovered) return;
+    this.hovered = k;
+    this.ev.hoverCell(p);
+  }
+
   private hover(e: MouseEvent): void {
     if (this.dragging) return;
     const t = this.hit(e);
+    this.setHover(t.zone === "cell" ? this.dataOf(t.i, t.j) : null);
     const edge = this.edgeAt(t.zone, t.sx, t.sy);
     this.scroller.style.cursor = edge >= 0 ? (t.zone === "col" ? "col-resize" : "row-resize") : "";
   }

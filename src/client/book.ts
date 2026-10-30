@@ -5,10 +5,12 @@ import { parseDelimited, toDelimited } from "../core/csv.ts";
 import { describeOp } from "../core/describe.ts";
 import { displayValue } from "../core/display.ts";
 import { isFormula, moveRefs } from "../core/formula/rewrite.ts";
-import { key, newSheet, sheetToJSON, type CondRule, type Format, type Sheet, type ViewState } from "../core/model.ts";
+import { key, newSheet, sheetToJSON, type CondRule, type Flag, type Format, type Sheet, type ViewState } from "../core/model.ts";
 import type { FormatPatch, Op } from "../core/ops.ts";
 import { columnValues } from "../core/view.ts";
-import { clearChildren, h, icon, ICONS } from "./dom.ts";
+import { clearChildren, h, icon, ICONS, TAG_ICON } from "./dom.ts";
+import { flagGroups, groupAt, type FlagGroup } from "../core/flags.ts";
+import { flagCard, FlagsPanel, flagPopover, myName, namePopover } from "./flags.ts";
 import { autofillOps } from "../core/fill.ts";
 import { Grid, union, type DisplayRect, type Pos } from "./grid.ts";
 import { colorPicker, CondPanel, filterPopover, menu, menuBelow, type MenuItem } from "./popups.ts";
@@ -25,7 +27,7 @@ interface Clip {
   sheet: string;
   rows: number[];
   cols: number[];
-  block: Array<Array<{ v: string | null; f: Format | null }>>;
+  block: Array<Array<{ v: string | null; f: Format | null; flag: Flag | null }>>;
 }
 
 export async function openBook(root: HTMLElement, bookId: string): Promise<void> {
@@ -59,6 +61,10 @@ class BookPage {
   private tools: Record<string, HTMLButtonElement> = {};
   private clip: Clip | null = null;
   private panel: CondPanel | null = null;
+  private flagsPanel: FlagsPanel | null = null;
+  private me: HTMLButtonElement;
+  private card: { el: HTMLElement; pos: Pos; flag: Flag } | null = null;
+  private hoverPos: Pos | null = null;
   private panelHost: HTMLElement;
   private lastRemote: { sheet: string; range: Range } | null = null;
 
@@ -73,6 +79,10 @@ class BookPage {
       resize: (axis, idx, size) => this.submit([{ t: "size", s: this.sheet.id, axis, sizes: idx.map((i) => [i, size]) }]),
       unhide: (axis, idx) => this.submit([{ t: "hide", s: this.sheet.id, axis, idx, hidden: false }]),
       pick: (p) => this.pickReference(p),
+      hoverCell: (p) => {
+        this.hoverPos = p;
+        this.updateFlagCard();
+      },
       fill: (source, target, alt) => this.autofill(source, target, alt),
     });
 
@@ -91,6 +101,14 @@ class BookPage {
     this.activity = h("button", { class: "activity", hidden: true, title: "Show the change" });
     this.activity.addEventListener("click", () => this.jumpToRemote());
     this.live = h("span", { class: "live connecting", role: "status" }, "Connecting");
+    // Who you are to others. Unset, it reads "Set your name" until you pick one (once per browser).
+    this.me = h("button", { class: "me", title: "Your name, shown on your edits and flags" });
+    const showMe = () => {
+      this.me.textContent = myName() || "Your name";
+      this.me.classList.toggle("unset", !myName());
+    };
+    showMe();
+    this.me.addEventListener("click", () => namePopover(this.me, showMe));
 
     this.addr = h("input", { class: "addr", "aria-label": "Cell reference", spellcheck: "false" });
     this.addr.addEventListener("keydown", (e) => {
@@ -137,7 +155,10 @@ class BookPage {
       if (e.relatedTarget !== this.formula && this.editing) this.commitEdit(null, false);
     });
     this.grid.root.append(this.editor);
-    this.grid.onPaint = () => this.placeEditor();
+    this.grid.onPaint = () => {
+      this.placeEditor();
+      this.placeFlagCard();
+    };
 
     this.stats = h("div", { class: "stats", "aria-live": "polite" });
     this.tabs = h("div", { class: "tabs", role: "tablist" });
@@ -147,7 +168,7 @@ class BookPage {
     root.replaceChildren(h("div", { class: "book" },
       h("header", { class: "bar" },
         h("a", { class: "mark", href: "/", title: "All workbooks" }, h("span", { class: "glyph", "aria-hidden": "true" }), "Sheets"),
-        this.title, h("div", { class: "spacer" }), this.activity, this.live),
+        this.title, h("div", { class: "spacer" }), this.activity, this.me, this.live),
       this.toolbar(),
       h("div", { class: "fbar" }, this.addr, h("span", { class: "fx", "aria-hidden": "true" }, "fx"), this.formula),
       h("div", { class: "work" }, this.grid.root, this.panelHost),
@@ -245,6 +266,7 @@ class BookPage {
       btn("freeze", "Freeze rows and columns", h("span", { class: "nf-label" }, icon(ICONS.freeze), icon(ICONS.caret)), (b) => this.freezeMenu(b), "wide"),
       btn("filter", "Filter and sort (shared with everyone)", icon(ICONS.filter), () => this.toggleFilter()),
       btn("cond", "Conditional fill", icon(ICONS.cond), () => this.togglePanel()),
+      btn("flag", "Flag for Claude: leave a note on the selected cells", icon(TAG_ICON), (b) => this.flagSelection(b), "tag-tool"),
     );
   }
 
@@ -342,10 +364,12 @@ class BookPage {
     on("right", align === "right" && !!f?.align);
     on("filter", !!this.sheet.view);
     on("cond", !!this.panel);
+    on("flag", !!this.sheet.cells.get(key(a.r, a.c))?.flag);
     this.tools.undo!.disabled = !this.session.canUndo;
     this.tools.redo!.disabled = !this.session.canRedo;
     this.updateColorBars(f);
     this.updateStats();
+    this.updateFlagCard();
   }
 
   private updateColorBars(f: Format | undefined): void {
@@ -416,10 +440,12 @@ class BookPage {
     this.style({ nf: next });
   }
 
-  private clearSelection(formats = false): void {
+  private clearSelection(formats = false, flags = false): void {
     const cells = this.selectedCells().filter(([r, c]) => this.sheet.cells.get(key(r, c))?.v !== undefined);
     const ops: Op[] = [];
     if (cells.length) ops.push({ t: "set", s: this.sheet.id, cells: cells.map(([r, c]) => [r, c, null]) });
+    const flagged = flags ? this.selectedCells().filter(([r, c]) => this.sheet.cells.get(key(r, c))?.flag) : [];
+    if (flagged.length) ops.push({ t: "flag", s: this.sheet.id, cells: flagged.map(([r, c]) => [r, c, null]) });
     if (formats) {
       const all = { b: null, i: null, s: null, color: null, fill: null, align: null, nf: null, wrap: null, rot: null };
       for (const range of this.selectionRuns()) ops.push({ t: "style", s: this.sheet.id, range, patch: all });
@@ -717,7 +743,7 @@ class BookPage {
     const s = this.sheet;
     const block = rows.map((row) => cols.map((c) => {
       const cell = s.cells.get(key(row, c));
-      return { v: cell?.v ?? null, f: cell?.f ?? null };
+      return { v: cell?.v ?? null, f: cell?.f ?? null, flag: cell?.flag ?? null };
     }));
     const text = toDelimited(rows.map((row) => cols.map((c) => displayValue(this.session.wb.value(s.id, row, c), s.cells.get(key(row, c))?.f?.nf))), "\t").replace(/\n$/, "");
     const esc = (t: string) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;");
@@ -725,7 +751,7 @@ class BookPage {
     e.clipboardData?.setData("text/plain", text);
     e.clipboardData?.setData("text/html", html);
     this.clip = { text, sheet: s.id, rows, cols, block };
-    if (cut) this.clearSelection();
+    if (cut) this.clearSelection(false, true); // a cut moves flags along with values
   }
 
   private paste(e: ClipboardEvent): void {
@@ -737,7 +763,7 @@ class BookPage {
     const r = g.rect;
     const s = this.sheet;
     const internal = this.clip && this.clip.text === text.replace(/\r?\n$/, "") ? this.clip : null;
-    const block: Array<Array<{ v: string | null; f?: Format | null; src?: Pos }>> = internal
+    const block: Array<Array<{ v: string | null; f?: Format | null; flag?: Flag | null; src?: Pos }>> = internal
       ? internal.block.map((row, i) => row.map((cell, j) => ({ ...cell, src: { r: internal.rows[i]!, c: internal.cols[j]! } })))
       : parseDelimited(text.replace(/\r?\n$/, ""), text.includes("\t") ? "\t" : ",").map((row) => row.map((v) => ({ v: v === "" ? null : v })));
     if (!block.length) return;
@@ -747,6 +773,8 @@ class BookPage {
     const rows = fill ? r.i2 - r.i1 + 1 : h1, cols = fill ? r.j2 - r.j1 + 1 : w1;
     const vals: Array<[number, number, string | null]> = [];
     const fmts: Array<[number, number, Format | null]> = [];
+    const flags: Array<[number, number, Flag | null]> = [];
+    let flagsTouched = false;
     for (let i = 0; i < rows; i++) {
       for (let j = 0; j < cols; j++) {
         const cell = fill ? block[0]![0]! : block[i]?.[j];
@@ -761,10 +789,15 @@ class BookPage {
         if (v && cell.src && isFormula(v)) v = moveRefs(v, t.r - cell.src.r, t.c - cell.src.c);
         vals.push([t.r, t.c, v]);
         if (cell.f !== undefined) fmts.push([t.r, t.c, cell.f]);
+        if (cell.flag !== undefined) {
+          flags.push([t.r, t.c, cell.flag]);
+          if (cell.flag || s.cells.get(key(t.r, t.c))?.flag) flagsTouched = true;
+        }
       }
     }
     const ops: Op[] = [{ t: "set", s: s.id, cells: vals }];
     if (fmts.length) ops.push({ t: "fmt", s: s.id, cells: fmts });
+    if (flagsTouched) ops.push({ t: "flag", s: s.id, cells: flags });
     const end = vals[vals.length - 1];
     if (end && this.submit(ops)) g.select(g.dataOf(r.i1, r.j1), { r: end[0], c: end[1] }, false);
   }
@@ -883,7 +916,14 @@ class BookPage {
     }
     if (kind === "cell") {
       const split = this.autofillSplit();
+      const flagged = !!s.cells.get(key(g.anchor.r, g.anchor.c))?.flag;
+      // Anchor the popover on the active cell: on a phone the toolbar's tag may be scrolled away.
+      const cellRect = () => {
+        const b = g.cellBox(g.displayOf(g.anchor).i, g.displayOf(g.anchor).j), root = g.root.getBoundingClientRect();
+        return new DOMRect(root.left + b.x, root.top + b.y, b.w, b.h);
+      };
       items.push("-",
+        { label: flagged ? "Edit flag…" : "Flag for Claude…", run: () => this.flagSelection({ getBoundingClientRect: cellRect }) },
         ...(split ? [{ label: split.label, run: () => this.autofill(split.source, split.target, false) }] : []),
         { label: "Clear contents", hint: "Delete", run: () => this.clearSelection() },
         { label: "Clear formatting", run: () => this.clearSelection(true) },
@@ -936,6 +976,7 @@ class BookPage {
   // ---- conditional fill panel ----------------------------------------------------------------
 
   private togglePanel(): void {
+    if (this.flagsPanel) this.toggleFlagsPanel();
     if (this.panel) {
       this.panel = null;
       clearChildren(this.panelHost);
@@ -954,6 +995,111 @@ class BookPage {
     this.panel.setRules(this.sheet.cond);
     this.panelHost.append(this.panel.el);
     this.onSelect();
+  }
+
+  // ---- flags ------------------------------------------------------------------------------------
+
+  /** Toolbar tag: flag the selection (or edit the flag on it) with a note for Claude. */
+  private flagSelection(anchor: { getBoundingClientRect(): DOMRect }): void {
+    if (this.editing) this.commitEdit(null, false);
+    const a = this.grid.anchor;
+    const r = this.grid.rect;
+    const single = r.i1 === r.i2 && r.j1 === r.j2;
+    const existing = this.sheet.cells.get(key(a.r, a.c))?.flag ?? null;
+    const group = existing && single ? groupAt(this.session.wb.doc, this.sheet.id, a.r, a.c) : null;
+    const cells: Array<[number, number]> = group ? group.cells : this.selectedCells();
+    if (cells.length > 10_000) return this.showToast("Flag at most 10,000 cells at once");
+    flagPopover({
+      anchor,
+      where: group ? group.ref.replace(/^.*!/, "") : this.selectionLabel(),
+      current: existing,
+      openCount: flagGroups(this.session.wb.doc).filter((g) => !g.flag.done).length,
+      save: (note) => {
+        const flag: Flag = { note, by: myName() || "browser", ts: Date.now() };
+        this.submit([{ t: "flag", s: this.sheet.id, cells: cells.map(([r, c]) => [r, c, flag]) }]);
+        this.me.textContent = myName() || "Your name";
+        this.me.classList.toggle("unset", !myName());
+        this.grid.focusGrid();
+      },
+      remove: () => this.removeFlag(this.sheet.id, a),
+      showAll: () => {
+        if (!this.flagsPanel) this.toggleFlagsPanel();
+      },
+    });
+  }
+
+  /** Remove (or, for a resolved one, dismiss) the flag at p and every cell flagged with it. */
+  private removeFlag(sheet: string, p: Pos): void {
+    const g = groupAt(this.session.wb.doc, sheet, p.r, p.c);
+    if (g) this.submit([{ t: "flag", s: sheet, cells: g.cells.map(([r, c]) => [r, c, null]) }]);
+  }
+
+  /** The note on the hovered cell, or else on the selected cell, shown beside it. */
+  private updateFlagCard(): void {
+    const p = this.hoverPos ?? this.grid.anchor;
+    const flag = this.editing ? undefined : this.sheet.cells.get(key(p.r, p.c))?.flag;
+    if (!flag) {
+      this.card?.el.remove();
+      this.card = null;
+      return;
+    }
+    if (!this.card || this.card.flag !== flag || this.card.pos.r !== p.r || this.card.pos.c !== p.c) {
+      this.card?.el.remove();
+      const sheet = this.sheet.id;
+      const el = flagCard(flag, {
+        edit: () => {
+          this.grid.select(p, p, false);
+          this.flagSelection(this.tools.flag!);
+        },
+        remove: () => this.removeFlag(sheet, p),
+      });
+      this.grid.root.append(el);
+      this.card = { el, pos: { ...p }, flag };
+    }
+    this.placeFlagCard();
+  }
+
+  private placeFlagCard(): void {
+    if (!this.card) return;
+    const { i, j } = this.grid.displayOf(this.card.pos);
+    const box = this.grid.cellBox(i, j);
+    const el = this.card.el;
+    // Beside the cell if there is room, else below it (above near the bottom): never over it.
+    const W = this.grid.root.clientWidth, H = this.grid.root.clientHeight;
+    const w = el.offsetWidth || 260, hgt = el.offsetHeight || 80;
+    let x = box.x + box.w + 6, y = box.y;
+    if (x + w > W - 4) x = box.x - w - 6;
+    if (x < 4) {
+      x = Math.max(4, Math.min(box.x, W - w - 4));
+      y = box.y + box.h + hgt + 6 <= H ? box.y + box.h + 6 : box.y - hgt - 6;
+    }
+    el.style.left = `${x}px`;
+    el.style.top = `${Math.max(4, y)}px`;
+  }
+
+  private toggleFlagsPanel(): void {
+    if (this.flagsPanel) {
+      this.flagsPanel = null;
+      clearChildren(this.panelHost);
+      requestAnimationFrame(() => this.grid.render());
+      return;
+    }
+    if (this.panel) this.togglePanel();
+    this.flagsPanel = new FlagsPanel(
+      () => this.session.wb,
+      (g) => this.jumpToFlag(g),
+      (g) => this.submit([{ t: "flag", s: g.sheet, cells: g.cells.map(([r, c]) => [r, c, null]) }]),
+      () => this.toggleFlagsPanel(),
+    );
+    this.panelHost.append(this.flagsPanel.el);
+  }
+
+  private jumpToFlag(g: FlagGroup): void {
+    const s = this.session.wb.doc.sheets.find((x) => x.id === g.sheet);
+    if (!s) return;
+    if (s !== this.sheet) this.switchSheet(s);
+    this.grid.select({ r: g.range.r1, c: g.range.c1 }, { r: g.range.r2, c: g.range.c2 });
+    this.grid.focusGrid();
   }
 
   // ---- sheets & tabs ---------------------------------------------------------------------------
@@ -1042,6 +1188,7 @@ class BookPage {
       document.title = `${doc.name} · Sheets`;
     }
     if (this.panel && e.ops.some((op) => op.t === "cond" || op.t === "insert" || op.t === "delete")) this.panel.setRules(this.sheet.cond);
+    this.flagsPanel?.render();
     if (e.remote && e.actor) {
       for (const [sid, cells] of e.touched) this.grid.flash(sid, cells);
       this.noteActivity(e);

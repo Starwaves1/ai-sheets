@@ -7,6 +7,7 @@ import { parseDelimited, toDelimited } from "../core/csv.ts";
 import { isFormula, moveRefs } from "../core/formula/rewrite.ts";
 import { findSheet, newSheet, OpError, sheetToJSON, usedRange, type Sheet } from "../core/model.ts";
 import type { FormatPatch, Op } from "../core/ops.ts";
+import { flagGroups } from "../core/flags.ts";
 import { Hub, newId, type LiveBook } from "./hub.ts";
 
 export interface Actor {
@@ -16,8 +17,11 @@ export interface Actor {
 /** Who is calling. LAN-only for now: trust the X-Actor header. Replace with real auth later. */
 export function identify(req: IncomingMessage): Actor | null {
   const h = req.headers["x-actor"];
-  const name = (Array.isArray(h) ? h[0] : h)?.trim().slice(0, 40);
-  return { name: name || "browser" };
+  let name = (Array.isArray(h) ? h[0] : h)?.trim() ?? "";
+  try {
+    name = decodeURIComponent(name); // browsers send names URI-encoded (headers are Latin-1)
+  } catch {}
+  return { name: name.trim().slice(0, 40) || "browser" };
 }
 
 export class HttpError extends Error {
@@ -156,6 +160,11 @@ export function makeApi(hub: Hub) {
       }
     }
 
+    // /api/flags: open flags in every workbook (?all=1 adds resolved ones), for agents to work through.
+    if (parts[0] === "flags" && parts.length === 1 && m === "GET") {
+      return send(res, 200, hub.list().flatMap((b) => flagsOf(b, q.get("all") === "1")));
+    }
+
     if (parts[0] !== "books" || !parts[1]) throw new HttpError(404, "not found");
     const lb = book(parts[1]);
     const sub = parts[2] ?? "";
@@ -183,6 +192,7 @@ export function makeApi(hub: Hub) {
     }
 
     if (sub === "events" && m === "GET") return events(lb, req, res, q);
+    if (sub === "flags" && m === "GET") return send(res, 200, flagsOf(lb, q.get("all") === "1"));
 
     if (sub === "range") {
       const ref = q.get("ref");
@@ -264,6 +274,19 @@ export function makeApi(hub: Hub) {
 
     throw new HttpError(404, `no route ${m} ${url.pathname}`);
   };
+
+  function flagsOf(lb: LiveBook, all: boolean) {
+    return flagGroups(lb.wb.doc).filter((g) => all || !g.flag.done).map((g) => {
+      const [r, c] = g.cells.find(([gr, gc]) => gr === g.range.r1 && gc === g.range.c1) ?? g.cells[0]!;
+      const sheet = lb.wb.doc.sheets.find((x) => x.id === g.sheet)!;
+      return {
+        book: lb.name, bookId: lb.id, url: `${lb.summary().url}#${encodeURIComponent(g.sheet)}`,
+        sheet: g.sheetName, ref: g.ref, cells: g.cells.length,
+        value: lb.wb.display(sheet, r, c), input: sheet.cells.get(r * 16384 + c)?.v ?? "",
+        ...g.flag,
+      };
+    });
+  }
 
   function events(lb: LiveBook, req: IncomingMessage, res: ServerResponse, q: URLSearchParams): void {
     res.writeHead(200, {

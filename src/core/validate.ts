@@ -50,6 +50,17 @@ function validateOp(op: unknown, at: string): void {
         if (c[2] !== null) format(c[2], at);
       }
       return;
+    case "flag":
+      need(Array.isArray(op.cells), `${at}: cells must be an array`);
+      for (const c of op.cells as unknown[]) {
+        need(Array.isArray(c) && isInt(c[0]) && isInt(c[1]), `${at}: cells are [row, col, flag|null]`);
+        const f = c[2];
+        if (f === null) continue;
+        need(isObj(f) && isStr(f.note) && isStr(f.by) && typeof f.ts === "number", `${at}: a flag needs note, by, ts`);
+        need(f.note.length <= 4000, `${at}: flag note is longer than 4000 characters`);
+        if (f.done !== undefined) need(isObj(f.done) && isStr(f.done.by) && typeof f.done.ts === "number" && (f.done.reply === undefined || isStr(f.done.reply)), `${at}: done needs by, ts, optional reply`);
+      }
+      return;
     case "style":
       range(op.range, at);
       format(op.patch, at);

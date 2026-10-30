@@ -23,9 +23,21 @@ export const FORMAT_KEYS = ["b", "i", "s", "color", "fill", "align", "nf", "wrap
 /** Named colors render with theme-aware shades (see styles.css). */
 export const PALETTE = ["green", "red", "amber", "blue", "violet", "grey"] as const;
 
+/**
+ * A note on a cell for someone (usually an agent) to look at. Resolving keeps the flag, with
+ * an optional reply, until the person who asked dismisses it (removes the flag).
+ */
+export interface Flag {
+  note: string;
+  by: string;
+  ts: number;
+  done?: { by: string; ts: number; reply?: string };
+}
+
 export interface Cell {
   v?: string; // raw input exactly as entered: "12", "hello", "=SUM(A1:A3)"
   f?: Format;
+  flag?: Flag;
 }
 
 export type CondOp =
@@ -153,7 +165,7 @@ export interface SheetJSON {
   name: string;
   rows: number;
   cols: number;
-  cells: Array<[number, number, string | null, Format?]>;
+  cells: Array<[number, number, string | null, (Format | null)?, Flag?]>;
   colW?: Array<[number, number]>;
   rowH?: Array<[number, number]>;
   hiddenRows?: number[];
@@ -172,8 +184,9 @@ export interface DocJSON {
 export function sheetToJSON(s: Sheet): SheetJSON {
   const cells: SheetJSON["cells"] = [];
   for (const [k, cell] of s.cells) {
-    const row: [number, number, string | null, Format?] = [keyRow(k), keyCol(k), cell.v ?? null];
-    if (cell.f) row.push(cell.f);
+    const row: SheetJSON["cells"][number] = [keyRow(k), keyCol(k), cell.v ?? null];
+    if (cell.f || cell.flag) row.push(cell.f ?? null);
+    if (cell.flag) row.push(structuredClone(cell.flag));
     cells.push(row);
   }
   return {
@@ -188,11 +201,12 @@ export function sheetToJSON(s: Sheet): SheetJSON {
 
 export function sheetFromJSON(j: SheetJSON): Sheet {
   const s = newSheet(j.id, j.name, j.rows, j.cols);
-  for (const [r, c, v, f] of j.cells) {
+  for (const [r, c, v, f, flag] of j.cells) {
     const cell: Cell = {};
     if (v !== null && v !== "") cell.v = v;
     if (f && Object.keys(f).length) cell.f = { ...f };
-    if (cell.v !== undefined || cell.f) s.cells.set(key(r, c), cell);
+    if (flag) cell.flag = structuredClone(flag);
+    if (cell.v !== undefined || cell.f || cell.flag) s.cells.set(key(r, c), cell);
   }
   s.colW = new Map(j.colW ?? []);
   s.rowH = new Map(j.rowH ?? []);

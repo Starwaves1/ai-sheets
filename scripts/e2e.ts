@@ -213,6 +213,63 @@ try {
   check((await cli("get", book.id, "F12:H12", "--csv")) === ",,\n", "a fill is one undoable change");
   await cli("clear", book.id, "B12:H18");
 
+  // Flags: the toolbar tag flags the selection (asking once for a name), the cell gets a marker and a
+  // card on hover, an agent resolves it from the CLI and the reply shows up live; flags travel with
+  // copy/paste (undoable) and with inserted rows; the panel lists them; Dismiss removes one.
+  const flagsOf = async () => (await api("GET", `/api/books/${book.id}/flags?all=1`)) as Array<{ ref: string; note: string; by: string; done?: { by: string; reply?: string } }>;
+  await goto("A1");
+  await goto("B2");
+  await page.click(".tool.tag-tool");
+  await page.fill(".flag-note", "is 3 right?");
+  await page.fill(".flag-pop .name-input", "Tester");
+  await page.click(".flag-pop .flag-save");
+  await page.waitForTimeout(400);
+  let fl = await flagsOf();
+  const marked = await page.evaluate(() => [...document.querySelectorAll(".c.flagged")].map((e) => e.textContent));
+  const me = await page.textContent(".me");
+  check(fl.length === 1 && fl[0]!.ref === "Sheet1!B2" && fl[0]!.by === "Tester" && marked.includes("3") && me === "Tester",
+    "toolbar tag flags the cell with your name and marks it", `${JSON.stringify(fl)} marked ${JSON.stringify(marked)} me ${me}`);
+  await goto("D5");
+  const b2 = await cellCenter("B", "2");
+  await page.mouse.move(b2.x, b2.y);
+  await page.waitForTimeout(150);
+  const hoverCard = await page.evaluate(() => document.querySelector(".flag-card .note")?.textContent);
+  await cli("resolve", book.id, "B2", "yes, 3 is right");
+  await page.waitForTimeout(500);
+  const doneCard = await page.evaluate(() => [document.querySelector(".flag-card .reply")?.textContent ?? "", !!document.querySelector(".c.flagged.done")] as const);
+  check(hoverCard === "is 3 right?" && !!doneCard[0]?.includes("yes, 3 is right") && doneCard[1] === true,
+    "hovering shows the note; an agent's resolve and reply appear live", `${hoverCard} / ${JSON.stringify(doneCard)}`);
+  await page.mouse.move(5, 5);
+  await cli("flag", book.id, "A3", "check cake");
+  await goto("A3");
+  await page.keyboard.press(`${MODK}+C`);
+  await goto("A6");
+  await page.keyboard.press(`${MODK}+V`);
+  await page.waitForTimeout(400);
+  const pastedFlag = (await flagsOf()).map((f) => f.ref).sort().join(",");
+  await page.keyboard.press(`${MODK}+Z`);
+  await page.waitForTimeout(400);
+  const undoneFlag = (await flagsOf()).map((f) => f.ref).sort().join(",");
+  await cli("insert", book.id, "1:1");
+  await page.waitForTimeout(300);
+  const shiftedFlag = (await flagsOf()).map((f) => f.ref).sort().join(",");
+  check(pastedFlag === "Sheet1!A3,Sheet1!A6,Sheet1!B2" && undoneFlag === "Sheet1!A3,Sheet1!B2" && shiftedFlag === "Sheet1!A4,Sheet1!B3",
+    "flags travel with copy/paste (undoable) and move with inserted rows", `${pastedFlag} | ${undoneFlag} | ${shiftedFlag}`);
+  await goto("A1");
+  await page.click(".tool.tag-tool");
+  await page.click(".flag-pop .all-flags");
+  const panelItems = await page.evaluate(() => [...document.querySelectorAll(".flags-panel .flag-item .note")].map((e) => e.textContent));
+  await page.click(".flags-panel .flag-item:has-text('check cake')");
+  const jumped = await page.evaluate(() => (document.querySelector(".addr") as HTMLInputElement).value);
+  await page.click(".flags-panel li.done .dismiss");
+  await page.waitForTimeout(400);
+  fl = await flagsOf();
+  check(panelItems.length === 2 && jumped === "A4" && fl.length === 1 && fl[0]!.ref === "Sheet1!A4",
+    "the Flags panel lists flags, jumps to one, and dismisses a resolved one", `${JSON.stringify(panelItems)} jumped ${jumped} left ${JSON.stringify(fl.map((f) => f.ref))}`);
+  const actors = new Set(((await api("GET", `/api/books/${book.id}/changes?since=0`)) as Array<{ actor: string }>).map((c) => c.actor));
+  check(actors.has("Tester"), "browser edits are attributed to the name you set", [...actors].join(", "));
+  await page.click(".flags-panel .icon-btn");
+  await cli("delete", book.id, "1:1");
   // Browser and OS shortcuts pass through: with the grid focused, none of these keydowns is
   // default-prevented (synthetic events: they never really reload or close anything). Ours still are.
   const KEYS = (mac: boolean) => {
