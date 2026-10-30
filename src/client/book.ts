@@ -68,6 +68,7 @@ class BookPage {
       filterMenu: (col, x, y) => this.openFilter(col, x, y),
       resize: (axis, idx, size) => this.submit([{ t: "size", s: this.sheet.id, axis, sizes: idx.map((i) => [i, size]) }]),
       unhide: (axis, idx) => this.submit([{ t: "hide", s: this.sheet.id, axis, idx, hidden: false }]),
+      pick: (p) => this.pickReference(p),
     });
 
     this.title = h("input", { class: "title", value: wb.doc.name, "aria-label": "Workbook name", spellcheck: "false" });
@@ -99,6 +100,7 @@ class BookPage {
       this.addr.select();
       justFocused = true;
     });
+    this.addr.addEventListener("blur", () => this.onSelect());
     this.addr.addEventListener("mouseup", (e) => {
       if (justFocused) e.preventDefault();
       justFocused = false;
@@ -106,6 +108,11 @@ class BookPage {
     this.formula = h("input", { class: "formula", "aria-label": "Cell contents", spellcheck: "false" });
     this.formula.addEventListener("focus", () => {
       if (!this.editing) this.startEdit(null, false, true);
+      else this.editing.quick = false; // arrows move the caret here, they never commit
+    });
+    // Leaving the formula bar (say, by clicking a cell) commits, as leaving the cell editor does.
+    this.formula.addEventListener("blur", (e) => {
+      if (e.relatedTarget !== this.editor && this.editing) this.commitEdit(null, false);
     });
     this.formula.addEventListener("input", () => {
       if (this.editing) {
@@ -313,7 +320,8 @@ class BookPage {
   private onSelect(): void {
     const a = this.grid.anchor;
     const r = this.grid.rect;
-    this.addr.value = r.i1 === r.i2 && r.j1 === r.j2 ? cellName(a.r, a.c) : this.selectionLabel();
+    // Not while someone is typing a reference there (a remote change also lands here).
+    if (document.activeElement !== this.addr) this.addr.value = r.i1 === r.i2 && r.j1 === r.j2 ? cellName(a.r, a.c) : this.selectionLabel();
     if (!this.editing) this.formula.value = this.sheet.cells.get(key(a.r, a.c))?.v ?? "";
     const f = this.activeFormat();
     const v = this.session.wb.value(this.sheet.id, a.r, a.c);
@@ -483,6 +491,28 @@ class BookPage {
     if (move) this.move(move === "down" ? 1 : move === "up" ? -1 : 0, move === "right" ? 1 : move === "left" ? -1 : 0, false);
     else this.onSelect();
     if (refocus) this.grid.focusGrid();
+  }
+
+  /**
+   * Clicking a cell while typing a formula, with the caret right after an operator, "(", "," or "=",
+   * inserts that cell's reference (clicking again swaps it) instead of leaving the editor.
+   */
+  private lastPick: { input: HTMLInputElement | HTMLTextAreaElement; start: number; end: number; text: string } | null = null;
+  private pickReference(p: Pos): boolean {
+    if (!this.editing) return false;
+    const input = document.activeElement === this.formula ? this.formula : document.activeElement === this.editor ? this.editor : null;
+    if (!input || !isFormula(input.value)) return false;
+    const ref = cellName(p.r, p.c);
+    const lp = this.lastPick;
+    let start = input.selectionStart ?? input.value.length;
+    let end = input.selectionEnd ?? start;
+    if (lp && lp.input === input && lp.text === input.value && start === lp.end && end === lp.end) start = lp.start;
+    else if (start !== end || !/[=(,+\-*/^&<>:;]\s*$/.test(input.value.slice(0, start))) return false;
+    input.setRangeText(ref, start, end, "end");
+    this.lastPick = { input, start, end: start + ref.length, text: input.value };
+    (input === this.formula ? this.editor : this.formula).value = input.value;
+    this.sizeEditor();
+    return true;
   }
 
   private cancelEdit(): void {

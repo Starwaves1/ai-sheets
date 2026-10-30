@@ -31,6 +31,8 @@ export interface GridEvents {
   filterMenu(col: number, x: number, y: number): void;
   resize(axis: "row" | "col", indices: number[], size: number | null): void;
   unhide(axis: "row" | "col", indices: number[]): void;
+  /** A click on a cell while a formula is being typed: return true if it was taken as a reference. */
+  pick(p: Pos): boolean;
 }
 
 interface Pane {
@@ -551,6 +553,7 @@ export class Grid {
       if (inside) return;
     }
     e.preventDefault();
+    if (e.button === 0 && t.zone === "cell" && this.ev.pick(this.dataOf(t.i, t.j))) return;
     this.focusGrid();
     const edge = this.edgeAt(t.zone, t.sx, t.sy);
     if (edge >= 0 && e.button === 0) return this.startResize(t.zone === "col" ? "col" : "row", edge, e);

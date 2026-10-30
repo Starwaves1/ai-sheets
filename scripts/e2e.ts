@@ -135,6 +135,56 @@ try {
   await page.waitForTimeout(300);
   check((await cli("get", book.id, "K2", "--csv")).trim() === "typed after copy", "typing over a selected cell still edits it");
 
+  // Formula bar: Enter commits and Esc cancels; arrows move the caret; clicking a cell commits and
+  // selects it (or, mid-formula, inserts its reference); afterwards typing and the clipboard still work.
+  const inputs = async (ref: string) => (await api("GET", `/api/books/${book.id}/range?ref=${ref}&show=inputs`)).values.map((r: string[]) => r.join("|")).join("/");
+  const cellCenter = (col: string, row: string) => page.evaluate(([c, r]) => {
+    const f = (sel: string, t: string) => [...document.querySelectorAll(sel)].find((e) => e.textContent === t)!.getBoundingClientRect();
+    const a = f(".colhead .h", c), b = f(".rowhead .h", r);
+    return { x: a.x + a.width / 2, y: b.y + b.height / 2 };
+  }, [col, row] as const);
+  const fbar = async (ref: string, text: string) => {
+    await goto(ref);
+    await page.click(".formula");
+    await page.keyboard.type(text);
+  };
+  await goto("A1");
+  await fbar("C5", "hello");
+  await page.keyboard.press("Enter");
+  await page.keyboard.type("next");
+  await page.keyboard.press("Enter");
+  await fbar("C7", "nope");
+  await page.keyboard.press("Escape");
+  await fbar("C8", "abc");
+  await page.keyboard.press("ArrowLeft");
+  await page.keyboard.press("ArrowLeft");
+  await page.keyboard.type("X");
+  await page.keyboard.press("Enter");
+  await page.waitForTimeout(300);
+  check(await inputs("C5:C8") === "hello/next//aXbc", "formula bar: Enter commits and focus returns to the grid, Esc cancels, arrows move the caret", await inputs("C5:C8"));
+  await fbar("C9", "clicked");
+  const d9 = await cellCenter("D", "9");
+  await page.mouse.click(d9.x, d9.y);
+  const afterClick = await page.evaluate(() => [(document.querySelector(".addr") as HTMLInputElement).value, (document.querySelector(".editor") as HTMLElement).hidden]);
+  await page.keyboard.type("after");
+  await page.keyboard.press("Enter");
+  await fbar("C10", "=1+");
+  for (const row of ["2", "3"]) {
+    const p = await cellCenter("B", row);
+    await page.mouse.click(p.x, p.y);
+  }
+  await page.keyboard.type("*2");
+  await page.keyboard.press("Enter");
+  await goto("C9");
+  await page.keyboard.press(`${MODK}+C`);
+  await goto("E10");
+  await page.keyboard.press(`${MODK}+V`);
+  await page.waitForTimeout(400);
+  const fb = await inputs("C9:E10");
+  check(fb === "clicked|after|/=1+B3*2||clicked" && afterClick[0] === "D9" && afterClick[1] === true,
+    "formula bar: clicking a cell commits and selects it; mid-formula it inserts the reference; then typing and copy/paste work", `${fb}, after click ${JSON.stringify(afterClick)}`);
+  await cli("clear", book.id, "C5:E10");
+
   // 3. idle cost
   await page.waitForTimeout(2200); // let the highlight fade finish
   // Layout and style-recalc counters come from Chromium's DevTools protocol; other browsers check timers and animations only.
@@ -153,8 +203,10 @@ try {
     `rAF ${counts.raf}, timeouts ${counts.timeout}, intervals ${counts.interval}, running animations ${anims}, layouts ${d("LayoutCount")}, style recalcs ${d("RecalcStyleCount")}, script ${d("ScriptDuration")} s, tasks ${d("TaskDuration")} s`);
 
   // 4. two browser tabs writing at once, one of them inserting a row
-  // Its own context (window), as a second person would have: pages sharing one window share focus in Firefox.
-  const ctx2 = await browser.newContext({ viewport: { width: 1280, height: 800 } });
+  // Its own browser, as a second person would have: in Firefox and WebKit, pages in one browser
+  // process share window focus, so typing into both at once drops keys a real user could never send.
+  const browser2 = await launch();
+  const ctx2 = await browser2.newContext({ viewport: { width: 1280, height: 800 } });
   const other = await ctx2.newPage();
   await other.goto(`${BASE}/b/${book.id}`, { waitUntil: "networkidle" });
   await other.waitForSelector(".live.live");
@@ -185,7 +237,7 @@ try {
   check(shifted === "\na0\n" && ya === yb && ya > 0, "a row inserted by an agent moves data in both tabs", `server ${JSON.stringify(shifted)}, a0 at y=${ya} and y=${yb}`);
   const inSync = await Promise.all([page, other].map((p) => p.evaluate(() => [...document.querySelectorAll(".c")].map((e) => e.textContent).filter((t) => /^(a|b)\d$/.test(t!)).sort().join(","))));
   check(inSync[0] === inSync[1] && inSync[0]!.split(",").length === 16, "both tabs show the same cells as the server", `${inSync[0]!.split(",").length} cells each`);
-  await ctx2.close();
+  await browser2.close();
 
   // 5. 50k cells
   const rows: string[] = [];
