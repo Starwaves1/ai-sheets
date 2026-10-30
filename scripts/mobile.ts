@@ -134,6 +134,41 @@ try {
     await page.keyboard.press("Escape");
     await cli("flag", scratch.id, "B3", "--remove");
 
+    // History on a phone: the bottom sheet, a tap previews a session, a tap on a marked cell shows
+    // before → after; then Cell history from the long-press menu, and Restore.
+    if (name === "iphone-15") {
+      await run(CLI, ["set", scratch.id, "C2", "agent-was-here"], { env: { ...process.env, SHEETS_URL: BASE, SHEETS_ACTOR: "bot" } });
+      await page.waitForTimeout(400);
+      await page.evaluate(() => { const t = document.querySelector(".toolbar")!; t.scrollLeft = t.scrollWidth; });
+      await page.tap(".tool.hist-tool");
+      await page.waitForSelector(".hist-row.session");
+      const sheetTop = await page.evaluate(() => document.querySelector(".hist-panel")!.getBoundingClientRect().top / innerHeight);
+      await page.tap(".hist-row.session:has-text('bot') .body");
+      await page.waitForSelector(".c.hist-mark");
+      const sheetTopPreview = await page.evaluate(() => document.querySelector(".hist-panel")!.getBoundingClientRect().top / innerHeight);
+      const markAt = await cellAt(page, "agent-was-here");
+      await page.touchscreen.tap(markAt!.x, markAt!.y);
+      await page.waitForTimeout(200);
+      const detail = await page.textContent(".pv-detail");
+      if (shots) await page.screenshot({ path: join(shots, `mobile-history-${name}.png`) });
+      check(sheetTop > 0.3 && sheetTopPreview > 0.55 && !!detail?.includes("empty → agent-was-here"),
+        `${name}: History bottom sheet; tap a session to preview, tap a marked cell for before → after`,
+        `sheet at ${Math.round(sheetTop * 100)}% (${Math.round(sheetTopPreview * 100)}% in preview), "${detail}"`);
+      await page.tap(".pv-actions .btn.primary");
+      await page.tap(".hist-panel header .icon-btn");
+      await page.waitForTimeout(1000);
+      const c2 = await cellAt(page, "agent-was-here");
+      await cdpLongPress(page, c2!.x, c2!.y);
+      await page.locator(".menu .item", { hasText: "Cell history" }).tap();
+      await page.waitForSelector(".cell-hist li");
+      if (shots) await page.screenshot({ path: join(shots, `mobile-cell-history-${name}.png`) });
+      await page.locator(".cell-hist li.origin .restore").tap();
+      await page.waitForTimeout(500);
+      const back = (await cli("get", scratch.id, "C2", "--csv")).trim();
+      check(back === "", `${name}: long-press "Cell history", Restore the earlier (empty) value`, JSON.stringify(back));
+      await page.tap(".cell-hist-panel header .icon-btn");
+    }
+
     // Moving rows on touch: long-press a row header, "Move row down".
     if (name === "iphone-15") {
       await page.waitForTimeout(1000);

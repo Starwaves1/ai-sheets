@@ -10,7 +10,12 @@ import type { FormatPatch, Op } from "../core/ops.ts";
 import { columnValues } from "../core/view.ts";
 import { clearChildren, h, icon, ICONS, TAG_ICON } from "./dom.ts";
 import { flagGroups, groupAt, type FlagGroup } from "../core/flags.ts";
-import { flagCard, FlagsPanel, flagPopover, myName, namePopover } from "./flags.ts";
+import { flagCard, FlagsPanel, flagPopover, myName, namePopover, when } from "./flags.ts";
+import type { Mark } from "../core/history.ts";
+import { Workbook } from "../core/workbook.ts";
+import { quoteSheet } from "../core/a1.ts";
+import { actorColor, CellHistoryPanel, HistoryPanel, type CellHistory, type Checkpoint } from "./history.ts";
+import { popup } from "./popups.ts";
 import { autofillOps } from "../core/fill.ts";
 import { Grid, union, type DisplayRect, type Pos } from "./grid.ts";
 import { colorPicker, CondPanel, filterPopover, menu, menuBelow, type MenuItem } from "./popups.ts";
@@ -19,6 +24,9 @@ import { Session, type ChangeEvent } from "./session.ts";
 // Shortcuts use the platform's command key: Cmd on Apple devices, Ctrl elsewhere. Anything not
 // listed in bindKeysOn (reload, tabs, zoom, find, print, bookmarks, devtools...) stays the browser's.
 const isMac = /Mac|iPhone|iPad|iPod/.test(navigator.platform);
+const CLOCK_ICON = '<circle cx="8" cy="8" r="5.6" fill="none" stroke="currentColor" stroke-width="1.4"/><path d="M8 4.8V8l2.2 1.6" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/>';
+/** "0.42 → =B2/C2" for a changed cell. */
+const markText = (m: Mark) => `${m.before ?? "empty"} → ${m.after ?? "empty"}${m.fmt && m.before === m.after ? " (formatting)" : ""}${m.by ? ` (${m.by})` : ""}`;
 const MOD = isMac ? "⌘" : "Ctrl+";
 const REDO_HINT = isMac ? "⌘⇧Z" : "Ctrl+Y";
 
@@ -66,11 +74,23 @@ class BookPage {
   // Hover intent for the flag card: the card for a hovered flagged cell stays while the pointer is on
   // the cell or the card, and for 300 ms after it leaves both (one timeout, only while leaving).
   private hoverCard: Pos | null = null;
+  // History: the panel, the cell-history panel, and the read-only view of a past version.
+  private history: HistoryPanel | null = null;
+  private cellPanel: CellHistoryPanel | null = null;
+  private preview: null | { wb: Workbook; v: number; version: number; title: string; from?: number; actor?: string; marks: Map<string, Map<number, Mark>> } = null;
+  private previewSeq = 0;
+  private previewBar: HTMLElement;
+  private markTip: HTMLElement | null = null;
   private overCard = false;
   private leaveTimer = 0;
   private cardOff = -1; // key of a selected cell whose card was closed (Esc, click elsewhere, scroll)
   private panelHost: HTMLElement;
   private lastRemote: { sheet: string; range: Range } | null = null;
+
+  /** The workbook on screen: a past version while previewing, else the live one. */
+  private get wb(): Workbook {
+    return this.preview?.wb ?? this.session.wb;
+  }
 
   constructor(private root: HTMLElement, private session: Session, private bookId: string) {
     const wb = session.wb;
@@ -167,12 +187,14 @@ class BookPage {
     this.tabs = h("div", { class: "tabs", role: "tablist" });
     this.toast = h("div", { class: "toast", role: "alert", hidden: true });
     this.panelHost = h("div", { class: "panel-host" });
+    this.previewBar = h("div", { class: "preview-bar", hidden: true, role: "status" });
 
     root.replaceChildren(h("div", { class: "book" },
       h("header", { class: "bar" },
         h("a", { class: "mark", href: "/", title: "All workbooks" }, h("span", { class: "glyph", "aria-hidden": "true" }), "Sheets"),
         this.title, h("div", { class: "spacer" }), this.activity, this.me, this.live),
       this.toolbar(),
+      this.previewBar,
       h("div", { class: "fbar" }, this.addr, h("span", { class: "fx", "aria-hidden": "true" }, "fx"), this.formula),
       h("div", { class: "work" }, this.grid.root, this.panelHost),
       h("footer", { class: "foot" },
@@ -198,6 +220,8 @@ class BookPage {
       this.live.title = s === "live" ? "Changes from others appear as they happen" : "";
     };
     session.onError = (msg) => this.showToast(msg);
+    session.onCommitted = (c) => this.history?.addChange(c);
+    session.onCheckpoints = (list) => this.history?.setCheckpoints(list as Checkpoint[]);
     session.onReset = () => location.reload();
     session.connect();
     document.title = `${wb.doc.name} · Sheets`;
@@ -278,6 +302,7 @@ class BookPage {
       btn("freeze", "Freeze rows and columns", h("span", { class: "nf-label" }, icon(ICONS.freeze), icon(ICONS.caret)), (b) => this.freezeMenu(b), "wide"),
       btn("filter", "Filter and sort (shared with everyone)", icon(ICONS.filter), () => this.toggleFilter()),
       btn("cond", "Conditional fill", icon(ICONS.cond), () => this.togglePanel()),
+      btn("history", "History: every change, who made it; preview, compare, revert", icon(CLOCK_ICON), () => this.toggleHistory(), "hist-tool"),
       btn("flag", "Flag for Claude: leave a note on the selected cells", icon(TAG_ICON), (b) => this.flagSelection(b), "tag-tool"),
     );
   }
@@ -363,7 +388,7 @@ class BookPage {
     if (document.activeElement !== this.addr) this.addr.value = r.i1 === r.i2 && r.j1 === r.j2 ? cellName(a.r, a.c) : this.selectionLabel();
     if (!this.editing) this.formula.value = this.sheet.cells.get(key(a.r, a.c))?.v ?? "";
     const f = this.activeFormat();
-    const v = this.session.wb.value(this.sheet.id, a.r, a.c);
+    const v = this.wb.value(this.sheet.id, a.r, a.c);
     const align = f?.align ?? (typeof v === "number" ? "right" : "left");
     const on = (name: string, state: boolean) => this.tools[name]?.classList.toggle("on", state);
     on("b", !!f?.b);
@@ -377,6 +402,8 @@ class BookPage {
     on("filter", !!this.sheet.view);
     on("cond", !!this.panel);
     on("flag", !!this.sheet.cells.get(key(a.r, a.c))?.flag);
+    on("history", !!this.history);
+    this.showMarkDetail();
     this.tools.undo!.disabled = !this.session.canUndo;
     this.tools.redo!.disabled = !this.session.canRedo;
     this.updateColorBars(f);
@@ -402,7 +429,7 @@ class BookPage {
     if (cells.length < 2 || cells.length > 200_000) return;
     let sum = 0, nums = 0, count = 0;
     for (const [r, c] of cells) {
-      const v = this.session.wb.value(this.sheet.id, r, c);
+      const v = this.wb.value(this.sheet.id, r, c);
       if (v === null || v === "") continue;
       count++;
       if (typeof v === "number") {
@@ -417,7 +444,15 @@ class BookPage {
 
   // ---- edits ------------------------------------------------------------------------------
 
+  /** While a past version is on screen nothing can be edited; say so instead. */
+  private readOnly(): boolean {
+    if (!this.preview) return false;
+    this.showToast("You're looking at an earlier version. Go back to live to edit.", { label: "Back to live", run: () => this.exitPreview() });
+    return true;
+  }
+
   private submit(ops: Op[], opts?: { undoable?: boolean }): boolean {
+    if (this.readOnly()) return false;
     try {
       this.session.submit(ops, opts);
       return true;
@@ -466,7 +501,7 @@ class BookPage {
   }
 
   private undo(redo: boolean): void {
-    if (this.editing) return;
+    if (this.editing || this.readOnly()) return;
     const ops = redo ? this.session.redo() : this.session.undo();
     if (!ops) return;
     // Put the selection where the change happened.
@@ -482,6 +517,10 @@ class BookPage {
   // ---- editing ------------------------------------------------------------------------------
 
   private startEdit(initial: string | null, quick: boolean, fromFormulaBar = false): void {
+    if (this.preview) {
+      if (!fromFormulaBar) this.readOnly();
+      return;
+    }
     const pos = { ...this.grid.anchor };
     this.grid.select(pos, pos);
     const original = this.sheet.cells.get(key(pos.r, pos.c))?.v ?? "";
@@ -638,7 +677,7 @@ class BookPage {
       return;
     }
     if (g.sheet) {
-      const s = this.session.wb.doc.sheets.find((x) => x.name.toLowerCase() === g.sheet!.toLowerCase());
+      const s = this.wb.doc.sheets.find((x) => x.name.toLowerCase() === g.sheet!.toLowerCase());
       if (!s) return this.showToast(`No sheet named ${g.sheet}`);
       this.switchSheet(s);
     }
@@ -761,7 +800,7 @@ class BookPage {
       const cell = s.cells.get(key(row, c));
       return { v: cell?.v ?? null, f: cell?.f ?? null, flag: cell?.flag ?? null };
     }));
-    const shown = rows.map((row) => cols.map((c) => displayValue(this.session.wb.value(s.id, row, c), s.cells.get(key(row, c))?.f?.nf)));
+    const shown = rows.map((row) => cols.map((c) => displayValue(this.wb.value(s.id, row, c), s.cells.get(key(row, c))?.f?.nf)));
     const text = toDelimited(shown, "\t").replace(/\n$/, "");
     const esc = (t: string) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/"/g, "&quot;");
     const clip: Clip = { text, rows, cols, block };
@@ -901,6 +940,15 @@ class BookPage {
       return [...set].filter((x) => x >= a && x <= b);
     };
     const items: Array<MenuItem | "-"> = [];
+    if (this.preview) {
+      menu([
+        { label: "Copy", hint: `${MOD}C`, run: () => { g.focusProxy(); document.execCommand("copy"); g.focusGrid(); } },
+        { label: "Cell history", run: () => void this.openCellHistory() },
+        "-",
+        { label: "Back to live", run: () => this.exitPreview() },
+      ], x, y);
+      return;
+    }
     if (kind === "cell") {
       items.push(
         { label: "Cut", hint: `${MOD}X`, run: () => { g.focusProxy(); document.execCommand("cut"); g.focusGrid(); } },
@@ -974,6 +1022,7 @@ class BookPage {
       };
       items.push("-",
         { label: flagged ? "Edit flag…" : "Flag for Claude…", run: () => this.flagSelection({ getBoundingClientRect: cellRect }) },
+        { label: "Cell history", run: () => void this.openCellHistory() },
         ...(split ? [{ label: split.label, run: () => this.autofill(split.source, split.target, false) }] : []),
         { label: "Clear contents", hint: "Delete", run: () => this.clearSelection() },
         { label: "Clear formatting", run: () => this.clearSelection(true) },
@@ -1048,6 +1097,7 @@ class BookPage {
 
   private togglePanel(): void {
     if (this.flagsPanel) this.toggleFlagsPanel();
+    if (!this.panel) this.closeHistoryPanels();
     if (this.panel) {
       this.panel = null;
       clearChildren(this.panelHost);
@@ -1072,6 +1122,7 @@ class BookPage {
 
   /** Toolbar tag: flag the selection (or edit the flag on it) with a note for Claude. */
   private flagSelection(anchor: { getBoundingClientRect(): DOMRect }): void {
+    if (this.readOnly()) return;
     if (this.editing) this.commitEdit(null, false);
     const a = this.grid.anchor;
     const r = this.grid.rect;
@@ -1106,6 +1157,7 @@ class BookPage {
   }
 
   private hoverCell(p: Pos | null): void {
+    if (this.preview) return this.showMarkTip(p);
     if (p && this.sheet.cells.get(key(p.r, p.c))?.flag) {
       clearTimeout(this.leaveTimer);
       this.leaveTimer = 0;
@@ -1140,7 +1192,7 @@ class BookPage {
     const a = this.grid.anchor;
     if (this.cardOff !== key(a.r, a.c)) this.cardOff = -1;
     const p = this.hoverCard ?? (this.cardOff === -1 ? a : null);
-    const flag = this.editing || !p ? undefined : this.sheet.cells.get(key(p.r, p.c))?.flag;
+    const flag = this.editing || !p || this.preview ? undefined : this.sheet.cells.get(key(p.r, p.c))?.flag;
     if (!flag || !p) {
       this.card?.el.remove();
       this.card = null;
@@ -1201,6 +1253,7 @@ class BookPage {
       return;
     }
     if (this.panel) this.togglePanel();
+    this.closeHistoryPanels();
     this.flagsPanel = new FlagsPanel(
       () => this.session.wb,
       (g) => this.jumpToFlag(g),
@@ -1222,7 +1275,7 @@ class BookPage {
 
   private renderTabs(): void {
     clearChildren(this.tabs);
-    for (const s of this.session.wb.doc.sheets) {
+    for (const s of this.wb.doc.sheets) {
       const tab = h("button", { class: `tab${s === this.sheet ? " on" : ""}`, role: "tab", "aria-selected": String(s === this.sheet) }, s.name);
       tab.addEventListener("click", () => this.switchSheet(s));
       tab.addEventListener("dblclick", () => this.renameTab(tab, s));
@@ -1281,6 +1334,7 @@ class BookPage {
     this.sheet = s;
     history.replaceState(null, "", `#${encodeURIComponent(s.id)}`);
     this.grid.setSheet(s);
+    if (this.preview) this.applyMarks();
     this.renderTabs();
     this.panel?.setRules(s.cond);
     this.onSelect();
@@ -1290,6 +1344,11 @@ class BookPage {
   // ---- incoming changes ----------------------------------------------------------------------------
 
   private onChange(e: ChangeEvent): void {
+    if (this.preview) {
+      // The past version stays on screen; the live sheet catches up when you go back.
+      if (e.remote && e.actor) this.noteActivity(e);
+      return;
+    }
     const doc = this.session.wb.doc;
     if (!doc.sheets.includes(this.sheet)) {
       // Our sheet was deleted (or replaced by undo of a delete).
@@ -1341,11 +1400,296 @@ class BookPage {
   }
 
   private toastTimer = 0;
-  private showToast(msg: string): void {
-    this.toast.textContent = msg;
+  private showToast(msg: string, action?: { label: string; run: () => void }): void {
+    clearChildren(this.toast);
+    this.toast.append(msg);
+    if (action) {
+      this.toast.append(h("button", { class: "toast-action", onclick: () => {
+        this.toast.hidden = true;
+        action.run();
+      } }, action.label));
+    }
     this.toast.hidden = false;
     clearTimeout(this.toastTimer);
-    this.toastTimer = window.setTimeout(() => (this.toast.hidden = true), 4000);
+    this.toastTimer = window.setTimeout(() => (this.toast.hidden = true), action ? 9000 : 4000);
+  }
+
+  // ---- history ------------------------------------------------------------------------------
+
+  private closeHistoryPanels(): void {
+    if (!this.history && !this.cellPanel) return;
+    this.history = null;
+    this.cellPanel = null;
+    clearChildren(this.panelHost);
+    requestAnimationFrame(() => this.grid.render());
+  }
+
+  /** Close every side panel (conditional fill, flags, history) so another can open. */
+  private closeSidePanels(): void {
+    if (this.panel) this.togglePanel();
+    if (this.flagsPanel) this.toggleFlagsPanel();
+    this.closeHistoryPanels();
+  }
+
+  private toggleHistory(): void {
+    if (this.history) {
+      this.closeHistoryPanels();
+      this.exitPreview();
+      this.onSelect();
+      return;
+    }
+    this.closeSidePanels();
+    this.history = new HistoryPanel({
+      bookId: this.bookId,
+      wb: () => this.session.wb,
+      version: () => this.session.version,
+      selectionRef: () => `${quoteSheet(this.sheet.name)}!${this.selectionLabel()}`,
+      preview: (p) => void this.enterPreview(p),
+      exitPreview: () => this.exitPreview(),
+      previewing: () => this.preview?.v ?? null,
+      revert: (versions, what) => void this.revertChanges(versions, what),
+      restore: (v, ts) => this.confirmRestore(v, ts),
+      nameVersion: (v, anchor) => this.nameVersion(v, anchor),
+      removeName: (cp) => void fetch(`/api/books/${encodeURIComponent(this.bookId)}/history/checkpoints/${cp.id}`, { method: "DELETE", headers: this.actorHeaders() }),
+      askName: (anchor) => namePopover(anchor, () => {
+        this.me.textContent = myName() || "Your name";
+        this.me.classList.toggle("unset", !myName());
+        this.history?.render();
+      }),
+      close: () => this.toggleHistory(),
+    });
+    this.panelHost.append(this.history.el);
+    this.onSelect();
+  }
+
+  private actorHeaders(): Record<string, string> {
+    return { "content-type": "application/json", ...(myName() ? { "x-actor": encodeURIComponent(myName()) } : {}) };
+  }
+
+  /** Show the workbook as it was at version v, read-only, marking the cells changed since `from`. */
+  private async enterPreview(p: { v: number; from?: number; only?: number[]; title: string; actor?: string }): Promise<void> {
+    const n = ++this.previewSeq;
+    const qs = new URLSearchParams({ v: String(p.v) });
+    if (p.from !== undefined) qs.set("from", String(p.from));
+    if (p.only?.length) qs.set("only", p.only.join(","));
+    const res = await fetch(`/api/books/${encodeURIComponent(this.bookId)}/history/at?${qs}`);
+    if (n !== this.previewSeq) return; // scrubbing: only the newest request counts
+    if (!res.ok) return this.showToast(((await res.json().catch(() => ({}))) as { error?: string }).error ?? "Couldn't load that version");
+    const data = (await res.json()) as { v: number; version: number; doc: import("../core/model.ts").DocJSON; marks: Mark[] };
+    if (this.editing) this.commitEdit(null, false);
+    const wb = Workbook.fromJSON(data.doc);
+    const marks = new Map<string, Map<number, Mark>>();
+    for (const m of data.marks) {
+      let x = marks.get(m.s);
+      if (!x) marks.set(m.s, (x = new Map()));
+      x.set(key(m.r, m.c), m);
+    }
+    this.preview = { wb, v: data.v, version: data.version, title: p.title, marks, ...(p.from !== undefined ? { from: p.from } : {}), ...(p.actor ? { actor: p.actor } : {}) };
+    // Stay on this sheet unless the changes are all on another one.
+    const here = wb.doc.sheets.find((x) => x.id === this.sheet.id);
+    const other = !marks.has(this.sheet.id) && marks.size ? wb.doc.sheets.find((x) => marks.has(x.id)) : undefined;
+    this.sheet = other ?? here ?? wb.doc.sheets[0]!;
+    this.root.classList.add("is-preview");
+    this.formula.readOnly = true;
+    this.grid.setWorkbook(wb);
+    this.grid.setSheet(this.sheet, !other);
+    this.applyMarks();
+    this.renderTabs();
+    this.renderPreviewBar();
+    // Bring the first changed cell into view if none is on screen.
+    const first = data.marks.find((m) => m.s === this.sheet.id);
+    if (first && !this.grid.isVisible({ r: first.r, c: first.c })) this.grid.select({ r: first.r, c: first.c });
+    this.onSelect();
+    this.history?.render();
+  }
+
+  private applyMarks(): void {
+    const m = this.preview?.marks.get(this.sheet.id);
+    this.grid.setMarks(m ? { sheet: this.sheet.id, keys: new Set(m.keys()) } : null);
+  }
+
+  private exitPreview(): void {
+    if (!this.preview) return;
+    this.preview = null;
+    this.previewSeq++;
+    this.showMarkTip(null);
+    this.root.classList.remove("is-preview");
+    this.formula.readOnly = false;
+    this.previewBar.hidden = true;
+    const doc = this.session.wb.doc;
+    this.sheet = doc.sheets.find((x) => x.id === this.sheet.id) ?? doc.sheets[0]!;
+    this.grid.setWorkbook(this.session.wb);
+    this.grid.setMarks(null);
+    this.grid.setSheet(this.sheet, true);
+    this.renderTabs();
+    this.onSelect();
+    this.history?.clearSelection();
+  }
+
+  private renderPreviewBar(): void {
+    const p = this.preview;
+    const bar = this.previewBar;
+    clearChildren(bar);
+    if (!p) {
+      bar.hidden = true;
+      return;
+    }
+    const n = [...p.marks.values()].reduce((a, m) => a + m.size, 0);
+    const compare = p.from !== undefined && p.v === p.version && !p.actor;
+    const btn = (label: string, run: () => void, cls = "") => h("button", { class: `btn ${cls}`, onclick: run }, label);
+    bar.append(
+      h("div", { class: "pv-text" },
+        h("span", { class: "pv-badge" }, compare ? "Comparing" : "Earlier version"),
+        h("span", { class: "pv-title" }, p.title),
+        h("span", { class: "pv-sub" }, `${compare ? "now" : `v${p.v}`}${p.from !== undefined ? ` · ${n} cell${n === 1 ? "" : "s"} changed` : ""} · read-only`),
+        h("span", { class: "pv-detail" })),
+      h("div", { class: "pv-actions" },
+        !compare ? btn("Compare with now", () => void this.enterPreview({ v: p.version, from: p.v, title: `Changes since v${p.v}` })) : null,
+        !compare ? btn("Restore…", () => this.confirmRestore(p.v, 0)) : null,
+        btn("Back to live", () => this.exitPreview(), "primary")));
+    bar.hidden = false;
+  }
+
+  /** In preview, the selected cell's before → after (how phones see it, by tapping). */
+  private showMarkDetail(): void {
+    const el = this.previewBar.querySelector(".pv-detail");
+    if (!el || !this.preview) return;
+    const a = this.grid.anchor;
+    const m = this.preview.marks.get(this.sheet.id)?.get(key(a.r, a.c));
+    el.textContent = m ? `${cellName(a.r, a.c)}: ${markText(m)}` : this.preview.marks.size ? "Tap or hover a highlighted cell to see what changed." : "";
+    el.classList.toggle("hint", !m);
+  }
+
+  private showMarkTip(p: Pos | null): void {
+    const m = p && this.preview?.marks.get(this.sheet.id)?.get(key(p.r, p.c));
+    if (!p || !m) {
+      this.markTip?.remove();
+      this.markTip = null;
+      return;
+    }
+    this.markTip?.remove();
+    const tip = h("div", { class: "mark-tip", role: "tooltip" },
+      h("div", { class: "head" }, h("b", {}, cellName(p.r, p.c)), m.by ? h("span", {}, h("span", { class: `dot ink-${actorColor(m.by)}` }), m.by) : null),
+      h("div", { class: "change" }, h("code", { class: "before" }, m.before ?? "empty"), " → ", h("code", { class: "after" }, m.after ?? "empty")),
+      m.fmt || m.flag ? h("div", { class: "also" }, [m.fmt ? "formatting changed" : "", m.flag ? "flag changed" : ""].filter(Boolean).join(", ")) : null);
+    this.grid.root.append(tip);
+    const { i, j } = this.grid.displayOf(p);
+    const b = this.grid.cellBox(i, j);
+    const W = this.grid.root.clientWidth;
+    tip.style.left = `${Math.min(b.x, W - tip.offsetWidth - 6)}px`;
+    tip.style.top = `${b.y + b.h + 4}px`;
+    this.markTip = tip;
+  }
+
+  private async revertChanges(versions: number[], what: string, force?: boolean): Promise<void> {
+    const url = `/api/books/${encodeURIComponent(this.bookId)}/history/revert`;
+    const post = async (body: object) => {
+      const res = await fetch(url, { method: "POST", headers: this.actorHeaders(), body: JSON.stringify({ versions, ...body }) });
+      const data = (await res.json()) as { v: number; reverted: number; skipped: Array<{ what: string; by: string }>; applied: boolean; error?: string };
+      if (!res.ok) throw new Error(data.error ?? res.statusText);
+      return data;
+    };
+    try {
+      if (force === undefined) {
+        const dry = await post({ dryRun: true });
+        if (dry.skipped.length) return this.confirmConflicts(versions, what, dry.skipped);
+      }
+      const r = await post({ force: !!force });
+      this.exitPreview();
+      if (!r.applied) return this.showToast("Nothing to revert: those changes are already undone.");
+      this.showToast(`Reverted ${what}.`, { label: "Undo", run: () => void this.revertChanges([r.v], "the revert", true) });
+    } catch (e) {
+      this.showToast(`Couldn't revert: ${(e as Error).message}`);
+    }
+  }
+
+  private confirmConflicts(versions: number[], what: string, skipped: Array<{ what: string; by: string }>): void {
+    let close = () => {};
+    const el = h("div", { class: "confirm" },
+      h("p", { class: "title" }, "Some of these cells were changed again later"),
+      h("ul", {}, ...skipped.map((x) => h("li", {}, h("b", {}, x.by), " changed ", h("code", {}, x.what)))),
+      h("p", { class: "hint" }, "Keep their edits and revert the rest, or put the old values back everywhere."),
+      h("div", { class: "actions" },
+        h("button", { class: "btn", onclick: () => close() }, "Cancel"),
+        h("button", { class: "btn", onclick: () => { close(); void this.revertChanges(versions, what, true); } }, "Overwrite them"),
+        h("button", { class: "btn primary", onclick: () => { close(); void this.revertChanges(versions, what, false); } }, "Keep their edits")));
+    close = popup(el, Math.max(8, innerWidth / 2 - 180), Math.max(60, innerHeight / 3 - 80));
+    el.querySelector<HTMLElement>(".primary")?.focus();
+  }
+
+  private confirmRestore(v: number, ts: number): void {
+    let close = () => {};
+    const sheet = this.sheet;
+    const go = async (one: boolean) => {
+      close();
+      const res = await fetch(`/api/books/${encodeURIComponent(this.bookId)}/history/restore`, {
+        method: "POST", headers: this.actorHeaders(), body: JSON.stringify({ v, ...(one ? { sheet: sheet.id } : {}) }) });
+      const r = (await res.json()) as { v: number; applied: boolean; error?: string };
+      if (!res.ok) return this.showToast(`Couldn't restore: ${r.error ?? res.statusText}`);
+      this.exitPreview();
+      this.showToast(r.applied ? `Restored ${one ? sheet.name : "the workbook"} to v${v}.` : "Nothing to restore: it's already the same.",
+        r.applied ? { label: "Undo", run: () => void this.revertChanges([r.v], "the restore", true) } : undefined);
+    };
+    const multi = this.session.wb.doc.sheets.length > 1;
+    const el = h("div", { class: "confirm" },
+      h("p", { class: "title" }, `Restore to ${ts ? when(ts) : `v${v}`}?`),
+      h("p", { class: "hint" }, "Everyone sees the change right away. It's added as a new edit on top of the history, so nothing is lost and you can undo it."),
+      h("div", { class: "actions" },
+        h("button", { class: "btn", onclick: () => close() }, "Cancel"),
+        multi ? h("button", { class: "btn", onclick: () => void go(true) }, `Only “${sheet.name}”`) : null,
+        h("button", { class: "btn primary", onclick: () => void go(false) }, multi ? "Whole workbook" : "Restore")));
+    close = popup(el, Math.max(8, innerWidth / 2 - 180), Math.max(60, innerHeight / 3 - 80));
+    el.querySelector<HTMLElement>(".primary")?.focus();
+  }
+
+  private nameVersion(v: number, anchor: HTMLElement): void {
+    const input = h("input", { class: "name-input", placeholder: "before int4 run", "aria-label": "Version name", maxlength: "120" });
+    const form = h("form", { class: "name-pop" },
+      h("label", {}, `Name v${v}`, input),
+      h("div", { class: "actions" }, h("button", { type: "submit", class: "btn primary" }, "Save")));
+    let close = () => {};
+    form.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const name = input.value.trim();
+      if (!name) return input.focus();
+      close();
+      const res = await fetch(`/api/books/${encodeURIComponent(this.bookId)}/history/checkpoints`, { method: "POST", headers: this.actorHeaders(), body: JSON.stringify({ name, v }) });
+      if (!res.ok) this.showToast("Couldn't name that version");
+    });
+    const r = anchor.getBoundingClientRect();
+    close = popup(form, Math.max(8, Math.min(r.left, innerWidth - 310)), r.bottom + 4);
+    input.focus();
+  }
+
+  private async openCellHistory(): Promise<void> {
+    const a = this.grid.anchor;
+    const sheet = this.session.wb.doc.sheets.find((x) => x.id === this.sheet.id);
+    if (!sheet) return;
+    // Cell history is about today's cell: in preview, that is the same stored position.
+    const ref = `${quoteSheet(sheet.name)}!${cellName(a.r, a.c)}`;
+    const res = await fetch(`/api/books/${encodeURIComponent(this.bookId)}/history/cell?ref=${encodeURIComponent(ref)}`);
+    if (!res.ok) return this.showToast("Couldn't load the cell's history");
+    const data = (await res.json()) as CellHistory;
+    this.closeSidePanels();
+    this.cellPanel = new CellHistoryPanel(data, {
+      restore: (value, ts) => {
+        this.exitPreview();
+        const s = this.session.wb.doc.sheets.find((x) => x.id === data.sheet);
+        if (!s) return;
+        try {
+          this.session.submit([{ t: "set", s: s.id, cells: [[data.r, data.c, value]] }], { meta: { kind: "cell", ref: data.ref, at: ts } });
+        } catch (e) {
+          return this.showToast((e as Error).message);
+        }
+        void this.openCellHistory();
+      },
+      preview: (v) => void this.enterPreview({ v, from: v - 1, only: [v], title: `${data.ref} at v${v}` }),
+      close: () => {
+        this.closeHistoryPanels();
+        this.exitPreview();
+      },
+    });
+    this.panelHost.append(this.cellPanel.el);
   }
 }
 

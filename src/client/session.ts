@@ -6,22 +6,15 @@
 import type { DocJSON } from "../core/model.ts";
 import { touchedCells, transformAll, type Op } from "../core/ops.ts";
 import { Workbook } from "../core/workbook.ts";
+import type { Change, Meta } from "../core/history.ts";
 import { myName } from "./flags.ts";
-
-interface Change {
-  v: number;
-  ops: Op[];
-  actor: string;
-  client: string;
-  ts: number;
-  seq?: number;
-}
 
 interface Pending {
   ops: Op[];
   inverse: Op[];
   sent: boolean;
   seq: number;
+  meta?: Meta;
 }
 
 export interface ChangeEvent {
@@ -51,6 +44,9 @@ export class Session {
   onStatus: (s: Status) => void = () => {};
   onError: (msg: string) => void = () => {};
   onReset: () => void = () => {};
+  /** Every change the server ordered, ours included (for the History panel). */
+  onCommitted: (c: Change) => void = () => {};
+  onCheckpoints: (list: unknown) => void = () => {};
 
   constructor(readonly bookId: string) {}
 
@@ -72,6 +68,7 @@ export class Session {
     es.addEventListener("hello", () => this.setStatus("live"));
     es.addEventListener("change", (e) => this.receive(JSON.parse((e as MessageEvent).data) as Change));
     es.addEventListener("reset", () => this.onReset());
+    es.addEventListener("checkpoints", (e) => this.onCheckpoints(JSON.parse((e as MessageEvent).data)));
     es.addEventListener("deleted", () => {
       es.close();
       this.setStatus("deleted");
@@ -100,10 +97,10 @@ export class Session {
   }
 
   /** Apply a local edit. Throws (and changes nothing) if the ops are invalid. */
-  submit(ops: Op[], opts: { undoable?: boolean } = {}): void {
+  submit(ops: Op[], opts: { undoable?: boolean; meta?: Meta } = {}): void {
     if (!ops.length) return;
     const res = this.wb.apply(ops);
-    this.pending.push({ ops, inverse: res.inverse, sent: false, seq: ++this.seq });
+    this.pending.push({ ops, inverse: res.inverse, sent: false, seq: ++this.seq, ...(opts.meta ? { meta: opts.meta } : {}) });
     if (opts.undoable !== false) {
       this.undoStack.push(res.inverse);
       if (this.undoStack.length > 200) this.undoStack.shift();
@@ -173,7 +170,7 @@ export class Session {
       const res = await fetch(`/api/books/${encodeURIComponent(this.bookId)}/ops`, {
         method: "POST",
         headers: { "content-type": "application/json", ...(myName() ? { "x-actor": encodeURIComponent(myName()) } : {}) },
-        body: JSON.stringify({ ops: next.ops, base: this.version, client: this.client, seq: next.seq }),
+        body: JSON.stringify({ ops: next.ops, base: this.version, client: this.client, seq: next.seq, ...(next.meta ? { meta: next.meta } : {}) }),
       });
       if (res.ok) return; // acknowledged through the event stream
       const msg = ((await res.json().catch(() => ({}))) as { error?: string }).error ?? res.statusText;
@@ -198,6 +195,7 @@ export class Session {
   private receive(c: Change): void {
     if (c.v <= this.version) return;
     this.version = c.v;
+    this.onCommitted(c);
     if (c.client === this.client) {
       // Our own change, acknowledged in order: send the next one.
       // Sends wait for this echo, so it is always the oldest pending change.

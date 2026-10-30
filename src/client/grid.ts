@@ -104,6 +104,9 @@ export class Grid {
   private raf = 0;
   private dragging: null | { kind: "cells" | "rows" | "cols" } = null;
 
+  /** Cells to mark (what a past change touched), by cell key, on one sheet. */
+  private marks: { sheet: string; keys: Set<number> } | null = null;
+
   constructor(private wb: Workbook, private ev: GridEvents) {
     this.sizer = h("div", { class: "sizer" });
     this.scroller = h("div", { class: "scroller", tabindex: "0", "aria-label": "Spreadsheet grid" }, this.sizer);
@@ -183,8 +186,23 @@ export class Grid {
 
   // ---- layout ---------------------------------------------------------------
 
-  setSheet(sheet: Sheet): void {
-    if (this.sheet !== sheet) {
+  /** Show another workbook (a past version) in place of the live one. */
+  setWorkbook(wb: Workbook): void {
+    this.wb = wb;
+  }
+
+  setMarks(marks: { sheet: string; keys: Set<number> } | null): void {
+    this.marks = marks;
+    for (const p of this.panes) p.cells.forEach((el) => (el._sig = ""));
+    this.render();
+  }
+
+  /** Show a sheet. keepPlace: the same sheet in another version, so scroll and selection stay. */
+  setSheet(sheet: Sheet, keepPlace = false): void {
+    if (keepPlace && this.sheet?.id === sheet.id) {
+      this.sheet = sheet;
+      this.flashes.clear();
+    } else if (this.sheet !== sheet) {
       this.sheet = sheet;
       this.anchor = { r: 0, c: 0 };
       this.focus = { r: 0, c: 0 };
@@ -247,6 +265,14 @@ export class Grid {
       return best;
     };
     return { i: near(this.rowPos, this.rows, p.r), j: near(this.colPos, this.cols, p.c) };
+  }
+
+  /** Is this data cell on screen? */
+  isVisible(p: Pos): boolean {
+    const { i, j } = this.displayOf(p);
+    if (this.rows[i] !== p.r || this.cols[j] !== p.c) return false;
+    const b = this.cellBox(i, j);
+    return b.x >= HEAD_W && b.y >= HEAD_H && b.x + b.w <= this.scroller.clientWidth && b.y + b.h <= this.scroller.clientHeight;
   }
 
   dataOf(i: number, j: number): Pos {
@@ -432,7 +458,8 @@ export class Grid {
         const flashT = this.flashes.get(k);
         const flashing = flashT !== undefined && now - flashT < FLASH_MS;
         const flag = s.cells.get(k)?.flag;
-        const extra = (filterBtn ? (view!.filters[c] || view!.sort?.col === c ? "filter on" : "filter") : "") + (flag ? (flag.done ? " flagged done" : " flagged") : "");
+        const marked = this.marks?.sheet === s.id && this.marks.keys.has(k);
+        const extra = (marked ? "hist-mark " : "") + (filterBtn ? (view!.filters[c] || view!.sort?.col === c ? "filter on" : "filter") : "") + (flag ? (flag.done ? " flagged done" : " flagged") : "");
         const cls = cellClass(f, align, v instanceof Err, spill, flashing, extra.trim());
         const style = cellStyle(f);
         const sig = `${text}\u0001${cls}\u0001${style}\u0001${x},${y},${w},${hgt}`;

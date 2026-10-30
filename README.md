@@ -16,6 +16,14 @@ A small, self-hosted spreadsheet for a person and their AI agents working on the
 <td><img src="docs/screenshots/flags-panel-dark.png" alt="The Flags panel: one open flag, one resolved with Claude's reply"></td>
 </tr></table>
 
+<table><tr>
+<td><img src="docs/screenshots/history-preview.png" alt="History panel with a session previewed: changed cells marked, before and after on hover"></td>
+<td><img src="docs/screenshots/history-compare-dark.png" alt="Comparing a version with now, dark theme"></td>
+</tr><tr>
+<td><img src="docs/screenshots/cell-history.png" alt="Cell history: every value a cell had, with restore"></td>
+<td><img src="docs/screenshots/phone-history.png" alt="History on a phone: bottom sheet, preview strip, a tapped cell's before and after" width="260"></td>
+</tr></table>
+
 ## What it does
 
 - Workbooks with multiple tabs; a virtualized grid that stays smooth with 50k+ cells.
@@ -23,6 +31,7 @@ A small, self-hosted spreadsheet for a person and their AI agents working on the
 - A fill handle on the selection continues patterns (1, 2, 3; Item 1, Item 2; Mon, Tue; repeating cycles); Ctrl or Alt while dragging copies instead. On touch, long-press a selection with empty cells after the data and choose Autofill.
 - Copy and paste as TSV, compatible with Google Sheets and Excel. Pasted formulas shift their relative references.
 - Undo and redo of your own edits, even while others are editing.
+- Version history in a side panel (a bottom sheet on phones): every change grouped into sessions and described in plain words ("claude set 12 cells in S2:BP19", "Garrett sorted by pass_rate"), live as edits arrive. Pick one to see the sheet as it was, read-only, with the changed cells marked and before → after on hover or tap; arrow keys scrub. Compare any version with now. Revert one person's session without losing anyone's later edits (cells changed again later are kept and listed, or overwritten if you say so). Restore a whole version as a new, undoable change. Name versions ("before int4 run"). Filter by person or by the selected cells. Cell history from the right-click or long-press menu shows every value a cell had, with one-tap restore.
 - Formulas with A1 references, ranges and cross-sheet references: arithmetic, comparison, `&`, `SUM AVERAGE COUNT COUNTA COUNTBLANK MIN MAX MEDIAN PRODUCT IF IFERROR AND OR NOT ROUND ROUNDUP ROUNDDOWN ABS COUNTIF SUMIF AVERAGEIF LEN UPPER LOWER TRIM CONCAT ISBLANK ISNUMBER ISERROR`. Recalculation follows dependencies; errors are `#REF!`, `#DIV/0!`, `#NAME?`, `#VALUE!`, `#CIRC!` (circular reference).
 - Insert, delete and move rows and columns (drag a selected header; on touch, long-press it). Formulas everywhere follow. Resize, hide and unhide, freeze rows and columns.
 - Sort and filter as a shared, persisted view that never moves stored data.
@@ -44,6 +53,8 @@ sheets format runs S2:BP19 --align center
 sheets cond runs add S2:BP19 eq 1 --fill green
 sheets flags                      # what Garrett flagged for you
 sheets resolve runs M5 "checked: 0.44 after the rerun"
+sheets history runs --by claude --since 2h       # what changed, by whom
+sheets revert runs s140                          # undo a session; others' later edits stay
 sheets watch runs
 ```
 
@@ -89,7 +100,9 @@ src/client   browser app, no framework
 
 **Collaboration.** Changes are small ops (set these cells, insert two rows, style this range), never whole-document saves. The server is the single ordering: each change gets the next version and goes to every open tab over SSE. A browser applies its own edits immediately and sends them one at a time. If someone else's change arrives first, the browser undoes its pending edits, applies the remote change, and re-applies its own, transformed past any row or column insertions. The server does the same for edits made against an older version. Two people editing different cells never overwrite each other. Edits to the same cell resolve last-writer-wins in server order.
 
-**Storage.** One SQLite file. Each workbook has a JSON snapshot and the list of changes since; a new snapshot is written every 200 changes and on shutdown. The change log doubles as history.
+**Storage.** One SQLite file. Each workbook has a JSON snapshot and the list of changes since; a new snapshot is written every 200 changes and on shutdown, and every snapshot is kept. Each change is stored with its inverse. Any version is rebuilt from the nearest snapshot plus at most a couple of hundred changes, so previewing history stays fast however long the log gets.
+
+**History.** Reverting a change applies its inverse, rebased past everything that happened since (the same transform the live sync uses), as a new change; parts that later edits by others overwrote are left alone and reported. Restoring a version applies the difference between now and then as one change. Both are ordinary changes: live for everyone, attributed, revertible.
 
 **Rendering.** Only cells in the viewport exist in the DOM, about 400 elements for a full screen. A native scroll container supplies scrollbars and wheel and touch input; the cell panes sit above it with `pointer-events: none`, and every click is mapped to a cell arithmetically. Paints run once per scroll event or data change, never in a loop. With nothing changing, the page runs no timers, animation frames, layouts or style recalculations (`npm run e2e` checks this). The only animation is a 1.8 s fade on cells someone else just changed.
 

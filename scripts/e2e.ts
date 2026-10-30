@@ -478,6 +478,118 @@ try {
     new MouseEvent("contextmenu", { clientX: x, clientY: y, shiftKey: true, bubbles: true, cancelable: true })), [h21.x, h21.y] as const);
   check(ourMenu && !shiftPrevented && !(await page.evaluate(() => !!document.querySelector(".popup.menu"))), "right-click opens the sheet menu; Shift+right-click is left to the browser");
 
+  // History, with two people in two browsers and an agent on the CLI, on a workbook of its own.
+  {
+    const hb = await api("POST", "/api/books", { name: `e2e history ${Date.now()}` });
+    created.push(hb.id);
+    await api("PUT", `/api/books/${hb.id}/range?ref=A1`, { values: [["run", "pass"], ["r1", "0.40"], ["r2", "0.50"], ["r3", "0.60"]] });
+    const agent = (...args: string[]) => run(CLI, args, { env: { ...process.env, SHEETS_URL: BASE, SHEETS_ACTOR: "bot" } });
+    const vals = async () => ((await api("GET", `/api/books/${hb.id}/range?ref=A1:C5&show=inputs`)).values as string[][]).map((r) => r.join("|")).join("/");
+    const open = async (b: typeof browser, name: string) => {
+      const c = await b.newContext({ viewport: { width: 1280, height: 800 } });
+      await c.addInitScript((n) => localStorage.setItem("sheets.name", n), name);
+      const p = await c.newPage();
+      await p.goto(`${BASE}/b/${hb.id}`, { waitUntil: "networkidle" });
+      await p.waitForSelector(".live.live");
+      return p;
+    };
+    const browserB = await launch();
+    const ann = await open(browser, "Ann");
+    const ben = await open(browserB, "Ben");
+    const typeIn = async (p: typeof page, ref: string, text: string) => {
+      await p.click(".addr"); await p.keyboard.type(ref); await p.keyboard.press("Enter");
+      await p.keyboard.type(text); await p.keyboard.press("Enter");
+      await p.waitForTimeout(300);
+    };
+    // The agent's session: three edits. Then Ann changes one of its cells, Ben adds a row of his own.
+    await agent("set", hb.id, "B2", "0.41");
+    await agent("set", hb.id, "B3", "0.52");
+    await agent("set", hb.id, "C1", "note");
+    await typeIn(ann, "B3", "0.55");
+    await typeIn(ben, "A5", "r4");
+    await ann.click(".tool.hist-tool");
+    await ann.waitForSelector(".hist-row.session");
+    const rows = await ann.evaluate(() => [...document.querySelectorAll(".hist-row.session .what")].map((e) => e.textContent));
+    await run(CLI, ["set", hb.id, "C2", "live?"], { env: { ...process.env, SHEETS_URL: BASE, SHEETS_ACTOR: "watcher" } });
+    await ann.waitForTimeout(500);
+    const liveRow = await ann.evaluate(() => document.querySelector(".hist-row.session .what")?.textContent ?? "");
+    check(rows.some((t) => t?.startsWith("bot set 3 cells in B1:C3")) && liveRow.startsWith("watcher") && liveRow.includes("C2"),
+      "History panel lists sessions in plain words and updates live", `${JSON.stringify(rows)} then ${liveRow}`);
+    // Preview the agent's session: read-only, its cells marked; typing and Delete change nothing.
+    const vBefore = (await api("GET", `/api/books/${hb.id}`)).version;
+    await ann.click(".hist-row.session:has-text('bot set 3 cells') .body");
+    await ann.waitForSelector(".preview-bar:not([hidden])");
+    await ann.waitForSelector(".c.hist-mark");
+    const marked = await ann.evaluate(() => [...document.querySelectorAll(".c.hist-mark")].map((e) => e.textContent).sort());
+    await ann.click(".addr"); await ann.keyboard.type("B2"); await ann.keyboard.press("Enter");
+    await ann.keyboard.type("oops"); await ann.keyboard.press("Enter"); await ann.keyboard.press("Delete");
+    await ann.waitForTimeout(400);
+    const vAfter = (await api("GET", `/api/books/${hb.id}`)).version;
+    const detail = await ann.textContent(".pv-detail");
+    check(JSON.stringify(marked) === JSON.stringify(["0.41", "0.52", "note"]) && vAfter === vBefore && !!detail?.includes("0.40 → 0.41"),
+      "preview shows the session's cells marked with before → after, and edits there go nowhere", `${JSON.stringify(marked)} v${vBefore}->v${vAfter} "${detail}"`);
+    await ann.click(".pv-actions .btn:has-text('Back to live')");
+    // Revert the agent's session: Ann's later B3 is kept (she chooses to keep it), Ben's row stays.
+    await ann.click(".hist-row.session:has-text('bot set 3 cells') .more");
+    await ann.click(".menu .item:has-text('Revert')");
+    await ann.waitForSelector(".confirm");
+    const conflict = await ann.textContent(".confirm");
+    await ann.click(".confirm .btn:has-text('Keep their edits')");
+    await ann.waitForTimeout(600);
+    const reverted = await vals();
+    const benSees = await ben.evaluate(() => [...document.querySelectorAll(".c")].some((e) => e.textContent === "0.41"));
+    check(!!conflict?.includes("Ann") && reverted === "run|pass|/r1|0.40|live?/r2|0.55|/r3|0.60|/r4||" && !benSees,
+      "reverting the agent's session keeps Ann's later edit and Ben's row; Ben's tab updates live", `${conflict} | ${reverted}`);
+    // Cell history: B3's values; restore the agent's 0.52, then undo it with the keyboard.
+    await ann.click(".addr"); await ann.keyboard.type("B3"); await ann.keyboard.press("Enter");
+    await ann.waitForTimeout(150); // the selection box moves on the next frame
+    const b3 = await ann.evaluate(() => { const r = document.querySelector(".sel-active")!.getBoundingClientRect(); return { x: r.x + 30, y: r.y + 10 }; });
+    await ann.mouse.click(b3.x, b3.y, { button: "right" });
+    await ann.click(".menu .item:has-text('Cell history')");
+    await ann.waitForSelector(".cell-hist li");
+    const cellRows = await ann.evaluate(() => [...document.querySelectorAll(".cell-hist li code")].map((e) => e.textContent));
+    await ann.click(".cell-hist li:has(code:text-is('0.52')) .restore");
+    await ann.waitForTimeout(500);
+    const restored = (await cli("get", hb.id, "B3", "--csv")).trim();
+    await ann.click(".cell-hist-panel .icon-btn");
+    await ann.click(".addr"); await ann.keyboard.press("Escape");
+    await ann.keyboard.press(`${MODK}+Z`);
+    await ann.waitForTimeout(500);
+    const undone = (await cli("get", hb.id, "B3", "--csv")).trim();
+    check(JSON.stringify(cellRows) === JSON.stringify(["0.55", "0.52", "0.50"]) && restored === "0.52" && undone === "0.55",
+      "cell history lists every value; Restore puts one back, and undo takes it back", `${JSON.stringify(cellRows)} restored ${restored} undone ${undone}`);
+    // Name the current version, then restore an older one; both tabs follow live.
+    await ann.click(".tool.hist-tool");
+    await ann.waitForSelector(".hist-row.session");
+    const named = (await api("GET", `/api/books/${hb.id}`)).version;
+    await ann.click(".hist-row.session .more");
+    await ann.click(".menu .item:has-text('Name this version')");
+    await ann.fill(".name-pop .name-input", "before restore");
+    await ann.keyboard.press("Enter");
+    await ann.waitForSelector(".hist-row.named:has-text('before restore')");
+    await ann.click(".hist-row.session:has-text('bot set 3 cells') .more");
+    await ann.click(".menu .item:has-text('Restore this version')");
+    await ann.click(".confirm .btn.primary");
+    await ann.waitForTimeout(600);
+    const afterRestore = await vals();
+    const benRestore = await ben.evaluate(() => [...document.querySelectorAll(".c")].map((e) => e.textContent).filter((t) => t === "0.52" || t === "r4"));
+    check(afterRestore === "run|pass|note/r1|0.41|/r2|0.52|/r3|0.60|/||" && JSON.stringify(benRestore) === JSON.stringify(["0.52"]),
+      "restoring a version applies live in both tabs (as one new change)", `${afterRestore} | Ben sees ${JSON.stringify(benRestore)}`);
+    // The restore is undoable from the toast; the named version is still there.
+    await ann.click(".toast-action");
+    await ann.waitForTimeout(600);
+    const backAgain = await vals();
+    const cps = await api("GET", `/api/books/${hb.id}/history/checkpoints`);
+    check(backAgain === reverted.replace("0.40|live?", "0.40|live?") && cps[0]?.v === named, "Undo in the toast reverts the restore; the named version stays", `${backAgain} | ${JSON.stringify(cps)}`);
+    await ben.context().close();
+    await browserB.close();
+    // Leave Ann's history panel open on this page for the idle check below? It is another page; close it.
+    await ann.context().close();
+  }
+  // The idle check below runs with the History panel open on the main page.
+  await page.click(".tool.hist-tool");
+  await page.waitForSelector(".hist-row");
+
   // 3. idle cost
   await page.waitForTimeout(2200); // let the highlight fade finish
   // Layout and style-recalc counters come from Chromium's DevTools protocol; other browsers check timers and animations only.
