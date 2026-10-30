@@ -209,7 +209,7 @@ try {
     await ctx.close();
   }
 } finally {
-  await fetch(`${BASE}/api/books/${scratch.id}`, { method: "DELETE" });
+  await fetch(`${BASE}/api/books/${scratch.id}?purge=1`, { method: "DELETE" }); // leave nothing behind
   await browser.close();
 }
 

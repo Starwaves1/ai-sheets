@@ -229,6 +229,7 @@ test("history: an old database without inverses or kept snapshots is migrated in
            CREATE TABLE changes (book TEXT NOT NULL, v INTEGER NOT NULL, ts INTEGER NOT NULL, actor TEXT NOT NULL, client TEXT NOT NULL, ops TEXT NOT NULL, seq INTEGER, PRIMARY KEY (book, v));`);
   const snap = { name: "Old", sheets: [{ id: "s1", name: "Runs", rows: 100, cols: 10, cells: [[0, 0, "a"], [1, 0, "b"], [2, 0, "c"]] }] };
   db.prepare("INSERT INTO books VALUES ('old1', 'Old', 1, 2, 3, 1, ?, 0)").run(JSON.stringify(snap));
+  db.prepare("INSERT INTO books VALUES ('gone', 'Deleted', 1, 2, 0, 0, ?, 1)").run(JSON.stringify(snap));
   db.prepare("INSERT INTO changes VALUES ('old1', 1, 1, 'seed', '', ?, NULL)").run(JSON.stringify([{ t: "renameSheet", s: "s1", name: "Runs" }]));
   db.prepare("INSERT INTO changes VALUES ('old1', 2, 2, 'garrett', 'x', ?, NULL)").run(JSON.stringify([{ t: "delete", s: "s1", axis: "row", at: 1, n: 1 }]));
   db.prepare("INSERT INTO changes VALUES ('old1', 3, 3, 'garrett', 'x', ?, NULL)").run(JSON.stringify([{ t: "set", s: "s1", cells: [[0, 1, "x"]] }]));
@@ -249,6 +250,36 @@ test("history: an old database without inverses or kept snapshots is migrated in
     assert.equal((await fetch(`${url}/history/at?v=0`)).status, 410);
   } finally {
     await old.close();
+  }
+  // Deleted books get no kept snapshots; live ones keep their newest snapshot only in snaps.
+  const after = new DatabaseSync(join(dir, "sheets.db"));
+  assert.equal((after.prepare("SELECT COUNT(*) AS n FROM snaps WHERE book = 'gone'").get() as { n: number }).n, 0);
+  assert.equal((after.prepare("SELECT snapshot FROM books WHERE id = 'old1'").get() as { snapshot: string }).snapshot, "");
+  after.close();
+  // And it still loads from there.
+  const again = startServer({ port: 0, host: "127.0.0.1", dataDir: dir, publicDir: dir });
+  await new Promise((r) => again.server.once("listening", r));
+  try {
+    const port = (again.server.address() as AddressInfo).port;
+    const vals = await fetch(`http://127.0.0.1:${port}/api/books/old1/range?ref=A1:B1&show=inputs`).then((x) => x.json() as Promise<any>);
+    assert.deepEqual(vals.values, [["a", "x"]]);
+  } finally {
+    await again.close();
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test("purge erases a workbook and its history; a plain delete keeps it in the file", async () => {
+  const a = await req("POST", "/api/books", { name: "Purge me" });
+  await req("PUT", `/api/books/${a.data.id}/range?ref=A1`, { values: [["x"]] });
+  const r = await req("DELETE", `/api/books/${a.data.id}?purge=1`);
+  assert.equal(r.data.purged, true);
+  assert.equal((await req("GET", `/api/books/${a.data.id}`)).status, 404);
+  const { DatabaseSync } = await import("node:sqlite");
+  const db = new DatabaseSync(join(dataDir, "sheets.db"), { readOnly: true });
+  for (const t of ["books", "changes", "snaps"]) {
+    const col = t === "books" ? "id" : "book";
+    assert.equal((db.prepare(`SELECT COUNT(*) AS n FROM ${t} WHERE ${col} = ?`).get(a.data.id) as { n: number }).n, 0, t);
+  }
+  db.close();
 });

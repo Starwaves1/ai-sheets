@@ -672,7 +672,7 @@ try {
   check(perf.maxCells < 2500, "50k-cell sheet keeps only visible cells in the DOM", `max ${perf.maxCells} cell elements, ${perf.total} elements total`);
   check(perf.p95 < 40, "scrolling 50k cells stays smooth", `two frames per step: median ${perf.median.toFixed(1)} ms, p95 ${perf.p95.toFixed(1)} ms`);
 } finally {
-  for (const id of created) await api("DELETE", `/api/books/${id}`);
+  for (const id of created) await api("DELETE", `/api/books/${id}?purge=1`); // tests leave nothing behind
   await browser.close();
 }
 console.log(`${BROWSER}: ${failed ? `${failed} check(s) failed` : "all checks passed"}`);

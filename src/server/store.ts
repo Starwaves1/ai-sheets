@@ -70,7 +70,7 @@ export class Store {
         doc TEXT NOT NULL,
         PRIMARY KEY (book, v)
       );
-      INSERT OR IGNORE INTO snaps (book, v, doc) SELECT id, snap_version, snapshot FROM books;
+      INSERT OR IGNORE INTO snaps (book, v, doc) SELECT id, snap_version, snapshot FROM books WHERE deleted = 0 AND snapshot != '';
       CREATE TABLE IF NOT EXISTS checkpoints (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         book TEXT NOT NULL,
@@ -80,10 +80,13 @@ export class Store {
         ts INTEGER NOT NULL
       );
     `);
+    // The newest snapshot lives in snaps; books.snapshot no longer keeps a second copy.
+    this.db.exec(`UPDATE books SET snapshot = '' WHERE snapshot != '' AND EXISTS (SELECT 1 FROM snaps s WHERE s.book = books.id AND s.v = books.snap_version)`);
   }
 
   books(): BookRow[] {
-    const rows = this.db.prepare("SELECT * FROM books WHERE deleted = 0 ORDER BY updated DESC").all() as Array<Record<string, unknown>>;
+    const rows = this.db.prepare(`SELECT b.*, COALESCE(s.doc, NULLIF(b.snapshot, '')) AS doc FROM books b
+      LEFT JOIN snaps s ON s.book = b.id AND s.v = b.snap_version WHERE b.deleted = 0 ORDER BY b.updated DESC`).all() as Array<Record<string, unknown>>;
     return rows.map((r) => ({
       id: r.id as string,
       name: r.name as string,
@@ -91,14 +94,14 @@ export class Store {
       updated: r.updated as number,
       version: r.version as number,
       snapVersion: r.snap_version as number,
-      snapshot: JSON.parse(r.snapshot as string) as DocJSON,
+      snapshot: JSON.parse(r.doc as string) as DocJSON,
     }));
   }
 
   create(id: string, name: string, doc: DocJSON, now: number): void {
     this.db
-      .prepare("INSERT INTO books (id, name, created, updated, version, snap_version, snapshot) VALUES (?, ?, ?, ?, 0, 0, ?)")
-      .run(id, name, now, now, JSON.stringify(doc));
+      .prepare("INSERT INTO books (id, name, created, updated, version, snap_version, snapshot) VALUES (?, ?, ?, ?, 0, 0, '')")
+      .run(id, name, now, now);
     this.db.prepare("INSERT OR REPLACE INTO snaps (book, v, doc) VALUES (?, 0, ?)").run(id, JSON.stringify(doc));
   }
 
@@ -118,9 +121,8 @@ export class Store {
   }
 
   snapshot(book: string, version: number, doc: DocJSON): void {
-    const text = JSON.stringify(doc);
-    this.db.prepare("UPDATE books SET snapshot = ?, snap_version = ? WHERE id = ?").run(text, version, book);
-    this.db.prepare("INSERT OR REPLACE INTO snaps (book, v, doc) VALUES (?, ?, ?)").run(book, version, text);
+    this.db.prepare("INSERT OR REPLACE INTO snaps (book, v, doc) VALUES (?, ?, ?)").run(book, version, JSON.stringify(doc));
+    this.db.prepare("UPDATE books SET snap_version = ? WHERE id = ?").run(version, book);
   }
 
   /** The newest kept snapshot at or before version v. */
@@ -176,6 +178,14 @@ export class Store {
   /** Soft delete: the row and its history stay in the file. */
   remove(book: string): void {
     this.db.prepare("UPDATE books SET deleted = 1 WHERE id = ?").run(book);
+  }
+
+  /** Hard delete: the book and all its history leave the file (tests and scratch books). */
+  purge(book: string): void {
+    this.db.exec("BEGIN");
+    for (const t of ["changes", "snaps", "checkpoints"]) this.db.prepare(`DELETE FROM ${t} WHERE book = ?`).run(book);
+    this.db.prepare("DELETE FROM books WHERE id = ?").run(book);
+    this.db.exec("COMMIT");
   }
 
   close(): void {

@@ -173,8 +173,9 @@ export function makeApi(hub: Hub) {
 
     if (sub === "" && m === "GET") return send(res, 200, lb.summary());
     if (sub === "" && m === "DELETE") {
-      hub.remove(lb);
-      return send(res, 200, { deleted: lb.id });
+      const purge = q.get("purge") === "1";
+      hub.remove(lb, purge);
+      return send(res, 200, { deleted: lb.id, ...(purge ? { purged: true } : {}) });
     }
     if (sub === "doc" && m === "GET") return send(res, 200, { ...lb.summary(), doc: lb.wb.toJSON() });
 

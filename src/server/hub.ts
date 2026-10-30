@@ -175,9 +175,13 @@ export class Hub {
     return lb;
   }
 
-  remove(lb: LiveBook): void {
-    lb.snapshot(this.store);
-    this.store.remove(lb.id);
+  /** Delete a workbook: kept in the file (recoverable) unless purge, which erases it and its history. */
+  remove(lb: LiveBook, purge = false): void {
+    if (purge) this.store.purge(lb.id);
+    else {
+      lb.snapshot(this.store);
+      this.store.remove(lb.id);
+    }
     this.books.delete(lb.id);
     lb.close();
   }
