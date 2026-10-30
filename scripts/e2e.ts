@@ -274,6 +274,116 @@ try {
   check(actors.has("Tester"), "browser edits are attributed to the name you set", [...actors].join(", "));
   await page.click(".flags-panel .icon-btn");
   await cli("delete", book.id, "1:1");
+  // Flags on the clipboard, with real keys: flagged value, flagged empty cell, a mixed range; into
+  // another tab of the workbook, another workbook, a second window; cut moves the flag.
+  {
+    const sid = (await api("GET", `/api/books/${book.id}`)).sheets[0].id;
+    const note = { by: "e2e", ts: 7 };
+    await api("PUT", `/api/books/${book.id}/range?ref=P40`, { values: [["pv", "", "plain"]] });
+    await api("POST", `/api/books/${book.id}/ops`, { ops: [{ t: "flag", s: sid, cells: [[39, 15, { ...note, note: "value" }], [39, 16, { ...note, note: "empty" }]] }] });
+    await page.waitForTimeout(300);
+    const refs = async (id: string) => ((await api("GET", `/api/books/${id}/flags`)) as Array<{ ref: string; note: string }>).map((f) => `${f.ref}=${f.note}`).sort().join(" ");
+    const copyAt = async (p: typeof page, ref: string, keys = "C") => {
+      await p.click(".addr"); await p.keyboard.type(ref); await p.keyboard.press("Enter");
+      await p.keyboard.press(`${MODK}+${keys}`);
+    };
+    const pasteAt = async (p: typeof page, ref: string) => {
+      await p.click(".addr"); await p.keyboard.type(ref); await p.keyboard.press("Enter");
+      await p.keyboard.press(`${MODK}+V`);
+      await p.waitForTimeout(400);
+    };
+    await goto("A1");
+    await copyAt(page, "P40"); await pasteAt(page, "P42");
+    await copyAt(page, "Q40"); await pasteAt(page, "Q42");
+    await copyAt(page, "P40:R40"); await pasteAt(page, "P44");
+    const same = (await refs(book.id)).split(" ").filter((x) => /![PQR]4\d=/.test(x)).join(" ");
+    const tab = await api("POST", `/api/books/${book.id}/sheets?name=Second`);
+    await page.waitForTimeout(300);
+    await page.click(".tab:has-text('Second')");
+    await pasteAt(page, "B2");
+    await page.click(".tab:has-text('Sheet1')");
+    const tabRefs = (await refs(book.id)).split(" ").filter((x) => x.startsWith("Second")).join(" ");
+    const other = await api("POST", "/api/books", { name: `e2e other ${Date.now()}` });
+    created.push(other.id);
+    const win = await ctx.newPage();
+    await win.goto(`${BASE}/b/${other.id}`, { waitUntil: "networkidle" });
+    await win.waitForSelector(".live.live");
+    await pasteAt(win, "C3");
+    const otherRefs = await refs(other.id);
+    await copyAt(page, "Q42", "X"); // cut the flagged empty cell
+    await pasteAt(win, "D5");
+    const afterCut = [await refs(book.id), await refs(other.id)];
+    await win.close();
+    check(same === "Sheet1!P40=value Sheet1!P42=value Sheet1!P44=value Sheet1!Q40=empty Sheet1!Q42=empty Sheet1!Q44=empty",
+      "flags copy with real keys: a flagged value, a flagged empty cell, a mixed range", same);
+    check(tabRefs === "Second!B2=value Second!C2=empty" && otherRefs === "Sheet1!C3=value Sheet1!D3=empty",
+      "flags paste into another tab of the workbook and into another workbook in a second window", `${tabRefs} | ${otherRefs}`);
+    check(!afterCut[0]!.includes("Q42") && afterCut[1]!.includes("Sheet1!D5=empty"), "cut and paste moves the flag", afterCut.join(" | "));
+    await api("POST", `/api/books/${book.id}/ops`, { ops: [{ t: "deleteSheet", s: tab.sheet.id }] });
+    await cli("flag", book.id, "P40:R44", "--remove");
+    await cli("clear", book.id, "P40:R44");
+    await page.waitForTimeout(300);
+  }
+
+  // Flag card hover intent: move diagonally from the cell to its Remove button and click it; the card
+  // closes 300 ms after leaving both, and on Esc; its note is selectable. The corner handle flags.
+  {
+    await cli("flag", book.id, "C20", "hover me");
+    await cli("flag", book.id, "C22", "second");
+    await goto("A1");
+    await goto("H25");
+    await page.waitForTimeout(300);
+    const c20 = await cellCenter("C", "20");
+    await page.mouse.move(c20.x, c20.y);
+    await page.waitForTimeout(100);
+    const btn = await page.evaluate(() => {
+      const b = [...document.querySelectorAll(".flag-card .actions .link")].find((e) => e.textContent === "Remove")!.getBoundingClientRect();
+      return { x: b.x + b.width / 2, y: b.y + b.height / 2 };
+    });
+    for (let k = 1; k <= 12; k++) await page.mouse.move(c20.x + (btn.x - c20.x) * k / 12, c20.y + (btn.y - c20.y) * k / 12);
+    // Select the note by dragging across it and copy it with the keyboard (read back by pasting below).
+    const noteBox = (await page.locator(".flag-card .note").boundingBox())!;
+    await page.mouse.move(noteBox.x + 1, noteBox.y + noteBox.height / 2);
+    await page.mouse.down();
+    await page.mouse.move(noteBox.x + noteBox.width - 1, noteBox.y + noteBox.height / 2, { steps: 4 });
+    await page.mouse.up();
+    await page.keyboard.press(`${MODK}+C`);
+    await page.mouse.click(btn.x, btn.y);
+    await page.waitForTimeout(400);
+    await page.click(".formula");
+    await page.keyboard.press(`${MODK}+V`);
+    const selectable = await page.evaluate(() => (document.querySelector(".formula") as HTMLInputElement).value.trim());
+    await page.keyboard.press("Escape");
+    const removed = !(await cli("flags", book.id)).includes("hover me");
+    const c22 = await cellCenter("C", "22");
+    await page.mouse.move(c22.x, c22.y);
+    await page.waitForTimeout(100);
+    const shown = await page.evaluate(() => document.querySelector(".flag-card .note")?.textContent);
+    const far = await cellCenter("A", "24");
+    await page.mouse.move(far.x, far.y, { steps: 3 });
+    const stillShown = await page.evaluate(() => !!document.querySelector(".flag-card"));
+    await page.waitForTimeout(450);
+    const goneAfter = await page.evaluate(() => !document.querySelector(".flag-card"));
+    await page.mouse.move(c22.x, c22.y);
+    await page.waitForTimeout(100);
+    await page.keyboard.press("Escape");
+    const escClosed = await page.evaluate(() => !document.querySelector(".flag-card"));
+    check(removed && selectable === "hover me" && shown === "second" && stillShown && goneAfter && escClosed,
+      "flag card: reachable diagonally (Remove works), lingers 300 ms after leaving, Esc closes it, note is selectable",
+      JSON.stringify({ removed, selectable, shown, stillShown, goneAfter, escClosed }));
+    await page.mouse.move(5, 5);
+    await goto("E24");
+    await page.waitForTimeout(150);
+    await page.click(".flag-handle");
+    await page.fill(".flag-note", "from the corner");
+    await page.keyboard.press("Enter");
+    await page.waitForTimeout(400);
+    const handleOn = await page.evaluate(() => document.querySelector(".flag-handle")!.classList.contains("on"));
+    check((await cli("flags", book.id)).includes("Sheet1!E24") && handleOn, "the flag handle on the selection's top-right corner flags it (then shows solid)");
+    await cli("flag", book.id, "C22", "--remove");
+    await cli("flag", book.id, "E24", "--remove");
+  }
+
   // Drag selected headers to move rows and columns; formulas follow; one undoable change.
   await api("PUT", `/api/books/${book.id}/range?ref=J30`, { values: [["j", "k", "l", "=K30"], ["j2", "k2", "l2", ""]] });
   await goto("A1");

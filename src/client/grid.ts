@@ -35,6 +35,8 @@ export interface GridEvents {
   pick(p: Pos): boolean;
   /** Dragged the selected display rows/cols [lo, hi] to the gap before display index `gap`. */
   move(axis: "row" | "col", lo: number, hi: number, gap: number): void;
+  /** The flag handle on the selection's top-right corner was pressed. */
+  flagHandle(handle: HTMLElement): void;
   /** The mouse moved onto another cell (null: off the cells). */
   hoverCell(p: Pos | null): void;
   fill(source: DisplayRect, target: DisplayRect, alt: boolean): void;
@@ -80,6 +82,7 @@ export class Grid {
   private handle: HTMLElement; // touch: drag to extend the selection
   private fillHandle: HTMLElement; // mouse: drag to autofill
   private fillPreview: HTMLElement;
+  private flagHandle: HTMLElement; // top-right corner: flag the selection
   // Keyboard focus sits in this hidden textarea with a one-space selection, not on the
   // scroller: Safari only fires copy/cut/paste on an editable element with a selection.
   private proxy: HTMLTextAreaElement;
@@ -126,6 +129,12 @@ export class Grid {
     this.handle = h("div", { class: "sel-handle", "aria-hidden": "true" });
     this.fillHandle = h("div", { class: "fill-handle", title: "Drag to fill (Ctrl or Alt: copy instead of a series)" });
     this.fillPreview = h("div", { class: "fill-preview", hidden: true });
+    this.flagHandle = h("div", { class: "flag-handle", title: "Flag for Claude", role: "button", "aria-label": "Flag the selection for Claude" });
+    this.flagHandle.addEventListener("pointerdown", (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      this.ev.flagHandle(this.flagHandle);
+    });
     const layer = h("div", { class: "layer" },
       ...this.panes.map((p) => p.clip), ...this.colHeads.map((x) => x.clip), ...this.rowHeads.map((x) => x.clip),
       corner, this.frozenLineV, this.frozenLineH, this.guide, this.fillPreview);
@@ -134,7 +143,7 @@ export class Grid {
       autocomplete: "off", autocorrect: "off", autocapitalize: "off", spellcheck: "false",
     });
     this.proxy.value = " ";
-    this.root = h("div", { class: "grid" }, this.scroller, layer, this.handle, this.fillHandle, this.proxy);
+    this.root = h("div", { class: "grid" }, this.scroller, layer, this.handle, this.fillHandle, this.flagHandle, this.proxy);
 
     this.scroller.addEventListener("scroll", () => this.render(), { passive: true });
     this.scroller.addEventListener("focus", () => {
@@ -880,6 +889,16 @@ export class Grid {
     this.handle.hidden = !ok;
     this.fillHandle.hidden = !ok;
     if (ok) this.handle.style.transform = this.fillHandle.style.transform = `translate(${x}px, ${y}px)`;
+    // Flag handle on the top-right corner: solid when that cell is flagged, an outline when not.
+    const t = this.cellBox(r.i1, r.j2);
+    const fx = t.x + t.w, fy = t.y;
+    const fok = fx > HEAD_W && fy >= HEAD_H && fx < W && fy < H;
+    this.flagHandle.hidden = !fok;
+    if (fok) {
+      this.flagHandle.style.transform = `translate(${fx}px, ${fy}px)`;
+      const top = this.dataOf(r.i1, r.j2);
+      this.flagHandle.classList.toggle("on", !!this.sheet.cells.get(key(top.r, top.c))?.flag);
+    }
   }
 
   // ---- fill handle ---------------------------------------------------------------------

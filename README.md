@@ -27,7 +27,7 @@ A small, self-hosted spreadsheet for a person and their AI agents working on the
 - Insert, delete and move rows and columns (drag a selected header; on touch, long-press it). Formulas everywhere follow. Resize, hide and unhide, freeze rows and columns.
 - Sort and filter as a shared, persisted view that never moves stored data.
 - Bold, italic, strikethrough, text and fill colors, alignment, wrap, rotated header text, number formats (`0.00`, `0%`, `#,##0`, `$#,##0.00`, scientific).
-- Flags for Claude: select cells, press the orange tag, write what an agent should look at. Agents list them with `sheets flags` and resolve them with a reply that stays on the cell until you dismiss it.
+- Flags for Claude: select cells, click the orange square on the selection's top-right corner (or the tag in the toolbar), write what an agent should look at. Flags copy and paste between tabs, workbooks and windows. Agents list them with `sheets flags` and resolve them with a reply that stays on the cell until you dismiss it.
 - Your name (set once per browser in the top bar) is shown on your edits and flags.
 - Conditional fill rules, such as green for 1 and red for 0 in a pass/fail matrix.
 - CSV import and export. Light and dark themes follow the OS; named colors adapt to both.

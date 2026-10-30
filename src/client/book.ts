@@ -24,7 +24,6 @@ const REDO_HINT = isMac ? "⌘⇧Z" : "Ctrl+Y";
 
 interface Clip {
   text: string;
-  sheet: string;
   rows: number[];
   cols: number[];
   block: Array<Array<{ v: string | null; f: Format | null; flag: Flag | null }>>;
@@ -64,7 +63,12 @@ class BookPage {
   private flagsPanel: FlagsPanel | null = null;
   private me: HTMLButtonElement;
   private card: { el: HTMLElement; pos: Pos; flag: Flag } | null = null;
-  private hoverPos: Pos | null = null;
+  // Hover intent for the flag card: the card for a hovered flagged cell stays while the pointer is on
+  // the cell or the card, and for 300 ms after it leaves both (one timeout, only while leaving).
+  private hoverCard: Pos | null = null;
+  private overCard = false;
+  private leaveTimer = 0;
+  private cardOff = -1; // key of a selected cell whose card was closed (Esc, click elsewhere, scroll)
   private panelHost: HTMLElement;
   private lastRemote: { sheet: string; range: Range } | null = null;
 
@@ -80,10 +84,8 @@ class BookPage {
       unhide: (axis, idx) => this.submit([{ t: "hide", s: this.sheet.id, axis, idx, hidden: false }]),
       pick: (p) => this.pickReference(p),
       move: (axis, lo, hi, gap) => this.moveBlock(axis, lo, hi, gap),
-      hoverCell: (p) => {
-        this.hoverPos = p;
-        this.updateFlagCard();
-      },
+      hoverCell: (p) => this.hoverCell(p),
+      flagHandle: (el) => this.flagSelection(el),
       fill: (source, target, alt) => this.autofill(source, target, alt),
     });
 
@@ -180,6 +182,15 @@ class BookPage {
 
     this.bindKeys();
     this.followKeyboard();
+    document.addEventListener("keydown", (e) => {
+      if (e.key === "Escape" && this.card && !e.defaultPrevented) this.closeCard();
+    });
+    document.addEventListener("pointerdown", (e) => {
+      if (this.card && !this.card.el.contains(e.target as Node) && this.hoverCard) this.closeCard();
+    }, true);
+    this.grid.root.addEventListener("scroll", () => {
+      if (this.hoverCard) this.closeCard();
+    }, { capture: true, passive: true });
     session.onChange = (e) => this.onChange(e);
     session.onStatus = (s) => {
       this.live.className = `live ${s}`;
@@ -693,6 +704,7 @@ class BookPage {
           this.move((k === "PageDown" ? 1 : -1) * g.pageRows, 0, e.shiftKey);
           return;
         case k === "Escape":
+          if (this.card) return this.closeCard();
           g.select(g.anchor, g.anchor, false);
           return;
       }
@@ -736,6 +748,9 @@ class BookPage {
 
   // ---- clipboard ----------------------------------------------------------------------------------
 
+  // Copy puts plain TSV and an HTML table on the clipboard for other apps. The table also carries
+  // the cells themselves (inputs, formats, flags, where they came from) in a data attribute, so a
+  // paste into any Sheets tab, workbook or window gets formulas, formats and flags back.
   private copy(e: ClipboardEvent, cut: boolean): void {
     if (this.editing) return;
     e.preventDefault();
@@ -746,24 +761,39 @@ class BookPage {
       const cell = s.cells.get(key(row, c));
       return { v: cell?.v ?? null, f: cell?.f ?? null, flag: cell?.flag ?? null };
     }));
-    const text = toDelimited(rows.map((row) => cols.map((c) => displayValue(this.session.wb.value(s.id, row, c), s.cells.get(key(row, c))?.f?.nf))), "\t").replace(/\n$/, "");
-    const esc = (t: string) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;");
-    const html = `<table>${rows.map((row) => `<tr>${cols.map((c) => `<td>${esc(displayValue(this.session.wb.value(s.id, row, c), s.cells.get(key(row, c))?.f?.nf))}</td>`).join("")}</tr>`).join("")}</table>`;
+    const shown = rows.map((row) => cols.map((c) => displayValue(this.session.wb.value(s.id, row, c), s.cells.get(key(row, c))?.f?.nf)));
+    const text = toDelimited(shown, "\t").replace(/\n$/, "");
+    const esc = (t: string) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/"/g, "&quot;");
+    const clip: Clip = { text, rows, cols, block };
+    const html = `<table data-sheets-clip="${esc(JSON.stringify(clip))}">${shown.map((row) => `<tr>${row.map((v) => `<td>${esc(v)}</td>`).join("")}</tr>`).join("")}</table>`;
     e.clipboardData?.setData("text/plain", text);
     e.clipboardData?.setData("text/html", html);
-    this.clip = { text, sheet: s.id, rows, cols, block };
+    this.clip = clip;
     if (cut) this.clearSelection(false, true); // a cut moves flags along with values
+  }
+
+  /** The Sheets cells on the clipboard: from its HTML, else from our own last copy if the text matches. */
+  private clipFrom(data: DataTransfer | null, text: string): Clip | null {
+    const html = data?.getData("text/html") ?? "";
+    if (html.includes("data-sheets-clip")) {
+      try {
+        const el = new DOMParser().parseFromString(html, "text/html").querySelector("[data-sheets-clip]");
+        const clip = JSON.parse(el?.getAttribute("data-sheets-clip") ?? "") as Clip;
+        if (Array.isArray(clip.block) && Array.isArray(clip.rows) && Array.isArray(clip.cols)) return clip;
+      } catch {}
+    }
+    return this.clip && this.clip.text === text.replace(/\r?\n$/, "") ? this.clip : null;
   }
 
   private paste(e: ClipboardEvent): void {
     if (this.editing) return;
     e.preventDefault();
     const text = e.clipboardData?.getData("text/plain") ?? "";
-    if (!text) return;
+    const internal = this.clipFrom(e.clipboardData, text);
+    if (!text && !internal) return;
     const g = this.grid;
     const r = g.rect;
     const s = this.sheet;
-    const internal = this.clip && this.clip.text === text.replace(/\r?\n$/, "") ? this.clip : null;
     const block: Array<Array<{ v: string | null; f?: Format | null; flag?: Flag | null; src?: Pos }>> = internal
       ? internal.block.map((row, i) => row.map((cell, j) => ({ ...cell, src: { r: internal.rows[i]!, c: internal.cols[j]! } })))
       : parseDelimited(text.replace(/\r?\n$/, ""), text.includes("\t") ? "\t" : ",").map((row) => row.map((v) => ({ v: v === "" ? null : v })));
@@ -1075,13 +1105,46 @@ class BookPage {
     if (g) this.submit([{ t: "flag", s: sheet, cells: g.cells.map(([r, c]) => [r, c, null]) }]);
   }
 
+  private hoverCell(p: Pos | null): void {
+    if (p && this.sheet.cells.get(key(p.r, p.c))?.flag) {
+      clearTimeout(this.leaveTimer);
+      this.leaveTimer = 0;
+      this.hoverCard = p;
+      this.updateFlagCard();
+    } else if (this.hoverCard && !this.overCard) this.leaveCard();
+  }
+
+  private leaveCard(): void {
+    clearTimeout(this.leaveTimer);
+    this.leaveTimer = window.setTimeout(() => {
+      this.leaveTimer = 0;
+      if (this.overCard) return;
+      this.hoverCard = null;
+      this.updateFlagCard();
+    }, 300);
+  }
+
+  /** Esc, a click elsewhere or a scroll: close the card until the selection moves. */
+  private closeCard(): void {
+    clearTimeout(this.leaveTimer);
+    this.leaveTimer = 0;
+    this.hoverCard = null;
+    this.overCard = false;
+    const a = this.grid.anchor;
+    this.cardOff = key(a.r, a.c);
+    this.updateFlagCard();
+  }
+
   /** The note on the hovered cell, or else on the selected cell, shown beside it. */
   private updateFlagCard(): void {
-    const p = this.hoverPos ?? this.grid.anchor;
-    const flag = this.editing ? undefined : this.sheet.cells.get(key(p.r, p.c))?.flag;
-    if (!flag) {
+    const a = this.grid.anchor;
+    if (this.cardOff !== key(a.r, a.c)) this.cardOff = -1;
+    const p = this.hoverCard ?? (this.cardOff === -1 ? a : null);
+    const flag = this.editing || !p ? undefined : this.sheet.cells.get(key(p.r, p.c))?.flag;
+    if (!flag || !p) {
       this.card?.el.remove();
       this.card = null;
+      this.overCard = false;
       return;
     }
     if (!this.card || this.card.flag !== flag || this.card.pos.r !== p.r || this.card.pos.c !== p.c) {
@@ -1092,7 +1155,19 @@ class BookPage {
           this.grid.select(p, p, false);
           this.flagSelection(this.tools.flag!);
         },
-        remove: () => this.removeFlag(sheet, p),
+        remove: () => {
+          this.removeFlag(sheet, p);
+          this.grid.focusGrid();
+        },
+      });
+      el.addEventListener("mouseenter", () => {
+        this.overCard = true;
+        clearTimeout(this.leaveTimer);
+        this.leaveTimer = 0;
+      });
+      el.addEventListener("mouseleave", () => {
+        this.overCard = false;
+        if (this.hoverCard) this.leaveCard();
       });
       this.grid.root.append(el);
       this.card = { el, pos: { ...p }, flag };
@@ -1108,8 +1183,8 @@ class BookPage {
     // Beside the cell if there is room, else below it (above near the bottom): never over it.
     const W = this.grid.root.clientWidth, H = this.grid.root.clientHeight;
     const w = el.offsetWidth || 260, hgt = el.offsetHeight || 80;
-    let x = box.x + box.w + 6, y = box.y;
-    if (x + w > W - 4) x = box.x - w - 6;
+    let x = box.x + box.w, y = box.y; // touching the cell, so the pointer can cross straight over
+    if (x + w > W - 4) x = box.x - w;
     if (x < 4) {
       x = Math.max(4, Math.min(box.x, W - w - 4));
       y = box.y + box.h + hgt + 6 <= H ? box.y + box.h + 6 : box.y - hgt - 6;
