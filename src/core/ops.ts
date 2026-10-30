@@ -401,9 +401,9 @@ export function moveHull(lo: number, hi: number, from: number, n: number, to: nu
   return [Math.min(...ends), Math.max(...ends)];
 }
 
-/** An insertion point (before index p) after a move; the end of the sheet stays the end. */
-function moveGap(p: number, count: number, from: number, n: number, to: number): number {
-  return p >= count ? p : moveIndex(p, from, n, to);
+/** An insertion point (before index p) after a move: it stays just below the row/col above it. */
+function moveGap(p: number, _count: number, from: number, n: number, to: number): number {
+  return p === 0 ? 0 : moveIndex(p - 1, from, n, to) + 1;
 }
 
 /** Shift one dimension [lo, hi] of a range; null if it is entirely deleted. */
@@ -707,13 +707,22 @@ export function transform(op: Op, prior: Op, doc?: Doc, priorFirst = true): Op |
   }
 }
 
+/**
+ * Rebase the op sequence `ops` past the sequence `prior`. Each op in a sequence is in the frame its
+ * predecessors leave (an undo of a row delete is "insert the row, then refill it"), so each prior
+ * op is itself moved past each op of `ops` before it meets the next one.
+ */
 export function transformAll(ops: Op[], prior: Op[], doc?: Doc, priorFirst = true): Op[] {
   let out = ops;
-  for (const p of prior) {
-    out = out.flatMap((op) => {
-      const t = transform(op, p, doc, priorFirst);
-      return t ? [t] : [];
-    });
+  for (const p0 of prior) {
+    const next: Op[] = [];
+    let p: Op | null = p0;
+    for (const op of out) {
+      const t = p ? transform(op, p, doc, priorFirst) : op;
+      if (t) next.push(t);
+      if (p) p = transform(p, op, doc, !priorFirst);
+    }
+    out = next;
   }
   return out;
 }

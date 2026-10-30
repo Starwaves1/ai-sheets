@@ -3,8 +3,9 @@
 
 import type { ServerResponse } from "node:http";
 import { randomBytes } from "node:crypto";
-import { newSheet, sheetToJSON, usedRange, type DocJSON } from "../core/model.ts";
-import { transformAll, type Op } from "../core/ops.ts";
+import type { Meta } from "../core/history.ts";
+import { docFromJSON, newSheet, sheetToJSON, usedRange, type Doc, type DocJSON } from "../core/model.ts";
+import { applyAll, transformAll } from "../core/ops.ts";
 import { validateOps } from "../core/validate.ts";
 import { Workbook } from "../core/workbook.ts";
 import { rangeName } from "../core/a1.ts";
@@ -63,7 +64,7 @@ export class LiveBook {
     return store.changesSince(this.id, since);
   }
 
-  submit(store: Store, rawOps: unknown, meta: { base?: number; actor: string; client: string; seq?: number }): Change {
+  submit(store: Store, rawOps: unknown, meta: { base?: number; actor: string; client: string; seq?: number; why?: Meta }): Change {
     // A client that lost the response to a request may send it again; apply it once.
     if (meta.client && meta.seq !== undefined) {
       const dup = this.recent.find((c) => c.client === meta.client && c.seq === meta.seq);
@@ -75,9 +76,10 @@ export class LiveBook {
       const prior = this.changesSince(store, base).filter((c) => c.client !== meta.client || !meta.client);
       ops = transformAll(ops, prior.flatMap((c) => c.ops), this.wb.doc);
     }
-    this.wb.apply(ops); // throws OpError and leaves the doc untouched on invalid ops
-    const change: Change = { v: this.version + 1, ops, actor: meta.actor, client: meta.client, ts: Date.now() };
+    const { inverse } = this.wb.apply(ops); // throws OpError and leaves the doc untouched on invalid ops
+    const change: Change = { v: this.version + 1, ops, actor: meta.actor, client: meta.client, ts: Date.now(), inv: inverse };
     if (meta.seq !== undefined) change.seq = meta.seq;
+    if (meta.why) change.meta = meta.why;
     store.append(this.id, change, this.name);
     this.version = change.v;
     this.updated = change.ts;
@@ -95,8 +97,25 @@ export class LiveBook {
   }
 
   private broadcast(c: Change): void {
-    const msg = `id: ${c.v}\nevent: change\ndata: ${JSON.stringify(c)}\n\n`;
+    const { inv: _inv, ...wire } = c; // browsers don't need inverses
+    const msg = `id: ${c.v}\nevent: change\ndata: ${JSON.stringify(wire)}\n\n`;
     for (const res of this.subs) res.write(msg);
+  }
+
+  /** A non-change event (named versions changed). */
+  notify(event: string, data: unknown): void {
+    const msg = `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
+    for (const res of this.subs) res.write(msg);
+  }
+
+  /** The workbook as it was at version v: the nearest kept snapshot plus the changes after it. */
+  docAt(store: Store, v: number): Doc {
+    if (v >= this.version) return docFromJSON(this.wb.toJSON());
+    const snap = store.snapBefore(this.id, v);
+    if (!snap) throw new RangeError(`history before v${store.oldestSnap(this.id)} was not kept`);
+    const doc = docFromJSON(snap.doc);
+    for (const c of store.changesBetween(this.id, snap.v, v)) applyAll(doc, c.ops);
+    return doc;
   }
 
   /** Tell subscribers the book is gone. */
@@ -116,7 +135,10 @@ export class Hub {
     for (const row of store.books()) {
       const wb = Workbook.fromJSON(row.snapshot);
       const changes = store.changesSince(row.id, row.snapVersion);
-      for (const c of changes) wb.apply(c.ops);
+      for (const c of changes) {
+        const { inverse } = wb.apply(c.ops);
+        if (!c.inv) store.setInverse(row.id, c.v, inverse); // changes from before inverses were kept
+      }
       const lb = new LiveBook(row.id, wb, row.version, row.created, row.updated, row.snapVersion);
       // Keep recent history (even if already in the snapshot) for transforms and resend dedupe.
       lb.recent = store.changesSince(row.id, Math.max(0, row.version - RECENT));

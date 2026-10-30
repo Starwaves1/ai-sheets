@@ -161,3 +161,94 @@ test("flags: listed across workbooks with the current value, resolved with a rep
   const done = await req("GET", "/api/books/Flagged/flags?all=1");
   assert.equal(done.data[0].done.reply, "1+1");
 });
+
+test("history: timeline, session revert keeps later edits, restore, compare, cell history, named versions", async () => {
+  const b = await req("POST", "/api/books", { name: "Hist" });
+  const id = b.data.id;
+  const as = (actor: string, method: string, path: string, body?: unknown) =>
+    fetch(base + path, { method, headers: { "x-actor": actor, "content-type": "application/json" }, body: body === undefined ? undefined : JSON.stringify(body) }).then((r) => r.json() as Promise<any>);
+  await as("garrett", "PUT", `/api/books/${id}/range?ref=A1`, { values: [["model", "pass"], ["a", "0.4"], ["b", "0.5"]] });
+  const v1 = (await as("garrett", "GET", `/api/books/${id}`)).version;
+  await as("claude", "PUT", `/api/books/${id}/range?ref=B2`, { values: [["0.41"], ["0.52"]] });
+  await as("claude", "PUT", `/api/books/${id}/range?ref=C1`, { values: [["note"]] });
+  await as("garrett", "PUT", `/api/books/${id}/range?ref=B3`, { values: [["0.55"]] }); // later edit to a cell Claude changed
+  const h = await as("x", "GET", `/api/books/${id}/history`);
+  assert.equal(h.summaries.length, 4);
+  assert.deepEqual(h.summaries.map((s: any) => s.actor), ["garrett", "claude", "claude", "garrett"]);
+  // Revert Claude's session (two changes): B2 back, C1 gone, Garrett's B3 kept and reported.
+  const dry = await as("garrett", "POST", `/api/books/${id}/history/revert`, { session: h.summaries[2].v, dryRun: true });
+  assert.equal(dry.applied, false);
+  assert.deepEqual(dry.skipped, [{ sheet: b.data.sheets[0].id, by: "garrett", what: "B3" }]);
+  const rv = await as("garrett", "POST", `/api/books/${id}/history/revert`, { session: h.summaries[2].v });
+  assert.equal(rv.reverted, 2);
+  const now = await as("x", "GET", `/api/books/${id}/range?ref=B2:C3&show=inputs`);
+  assert.deepEqual(now.values, [["0.4", ""], ["0.55", ""]]);
+  const after = await as("x", "GET", `/api/books/${id}/history`);
+  assert.equal(after.summaries.at(-1).meta.kind, "revert");
+  // Compare: since v1, what changed (B3 only; B2 and C1 went back).
+  const at = await as("x", "GET", `/api/books/${id}/history/at?from=${v1}`);
+  assert.deepEqual(at.marks.map((m: any) => `${m.r},${m.c}:${m.before}->${m.after}`), ["2,1:0.5->0.55"]);
+  // A past version, rebuilt, with the cells one change touched.
+  const past = await as("x", "GET", `/api/books/${id}/history/at?v=${v1 + 1}&from=${v1}&only=${v1 + 1}`);
+  assert.equal(past.doc.sheets[0].cells.find((c: any) => c[0] === 1 && c[1] === 1)[2], "0.41");
+  assert.equal(past.marks.length, 2);
+  // Cell history, newest first.
+  const ch = await as("x", "GET", `/api/books/${id}/history/cell?ref=B3`);
+  assert.deepEqual(ch.entries.map((e: any) => `${e.actor}:${e.value}`), ["garrett:0.55", "claude:0.52", "garrett:0.5"]);
+  // Restore v1 as a new change; the restore itself can be reverted.
+  const rs = await as("garrett", "POST", `/api/books/${id}/history/restore`, { v: v1 });
+  assert.equal(rs.applied, true);
+  assert.deepEqual((await as("x", "GET", `/api/books/${id}/range?ref=B3&show=inputs`)).values, [["0.5"]]);
+  await as("garrett", "POST", `/api/books/${id}/history/revert`, { versions: [rs.v] });
+  assert.deepEqual((await as("x", "GET", `/api/books/${id}/range?ref=B3&show=inputs`)).values, [["0.55"]]);
+  // Named versions.
+  const cp = await as("garrett", "POST", `/api/books/${id}/history/checkpoints`, { name: "before int4 run" });
+  assert.equal(cp.name, "before int4 run");
+  assert.equal((await as("x", "GET", `/api/books/${id}/history`)).checkpoints[0].name, "before int4 run");
+  await as("garrett", "DELETE", `/api/books/${id}/history/checkpoints/${cp.id}`);
+  assert.equal((await as("x", "GET", `/api/books/${id}/history/checkpoints`)).length, 0);
+  // Filter by range and by person.
+  const onlyB3 = await as("x", "GET", `/api/books/${id}/history?range=B3`);
+  assert.ok(onlyB3.summaries.every((s: any) => s.v !== v1 + 2));
+  const byClaude = await as("x", "GET", `/api/books/${id}/history?by=claude`);
+  assert.equal(byClaude.summaries.length, 2);
+  // Survives a restart: inverses and snapshots are on disk.
+  await srv.close();
+  await boot();
+  const again = await as("garrett", "POST", `/api/books/${id}/history/revert`, { versions: [v1 + 1], dryRun: true });
+  assert.equal(again.applied, false);
+  assert.equal((await as("x", "GET", `/api/books/${id}/history/at?v=${v1}`)).doc.sheets[0].cells.length, 6);
+});
+
+test("history: an old database without inverses or kept snapshots is migrated in place", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sheets-old-"));
+  const { DatabaseSync } = await import("node:sqlite");
+  const db = new DatabaseSync(join(dir, "sheets.db"));
+  db.exec(`CREATE TABLE books (id TEXT PRIMARY KEY, name TEXT NOT NULL, created INTEGER NOT NULL, updated INTEGER NOT NULL,
+             version INTEGER NOT NULL, snap_version INTEGER NOT NULL, snapshot TEXT NOT NULL, deleted INTEGER NOT NULL DEFAULT 0);
+           CREATE TABLE changes (book TEXT NOT NULL, v INTEGER NOT NULL, ts INTEGER NOT NULL, actor TEXT NOT NULL, client TEXT NOT NULL, ops TEXT NOT NULL, seq INTEGER, PRIMARY KEY (book, v));`);
+  const snap = { name: "Old", sheets: [{ id: "s1", name: "Runs", rows: 100, cols: 10, cells: [[0, 0, "a"], [1, 0, "b"], [2, 0, "c"]] }] };
+  db.prepare("INSERT INTO books VALUES ('old1', 'Old', 1, 2, 3, 1, ?, 0)").run(JSON.stringify(snap));
+  db.prepare("INSERT INTO changes VALUES ('old1', 1, 1, 'seed', '', ?, NULL)").run(JSON.stringify([{ t: "renameSheet", s: "s1", name: "Runs" }]));
+  db.prepare("INSERT INTO changes VALUES ('old1', 2, 2, 'garrett', 'x', ?, NULL)").run(JSON.stringify([{ t: "delete", s: "s1", axis: "row", at: 1, n: 1 }]));
+  db.prepare("INSERT INTO changes VALUES ('old1', 3, 3, 'garrett', 'x', ?, NULL)").run(JSON.stringify([{ t: "set", s: "s1", cells: [[0, 1, "x"]] }]));
+  db.close();
+  const old = startServer({ port: 0, host: "127.0.0.1", dataDir: dir, publicDir: dir });
+  await new Promise((r) => old.server.once("listening", r));
+  const url = `http://127.0.0.1:${(old.server.address() as AddressInfo).port}/api/books/old1`;
+  try {
+    // The row delete (after the kept snapshot) can be reverted: its inverse was rebuilt on load.
+    const r = await fetch(`${url}/history/revert`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ versions: [2] }) }).then((x) => x.json() as Promise<any>);
+    assert.equal(r.applied, true);
+    const vals = await fetch(`${url}/range?ref=A1:A3`).then((x) => x.json() as Promise<any>);
+    assert.deepEqual(vals.values, [["a"], ["b"], ["c"]]);
+    // Before the kept snapshot, history is listed but not rebuildable.
+    const h = await fetch(`${url}/history`).then((x) => x.json() as Promise<any>);
+    assert.equal(h.oldest, 1);
+    assert.equal(h.summaries[0].undoable, false);
+    assert.equal((await fetch(`${url}/history/at?v=0`)).status, 410);
+  } finally {
+    await old.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

@@ -15,6 +15,7 @@ sheets flags --all                         # resolved ones too, with replies
 
 `resolve` marks the flag done and attaches your reply. Both stay on the cell (green marker) until Garrett dismisses them, so say what you found or changed in one or two sentences. You can leave a flag for him too: `sheets flag <book> B4 "note"` (`--remove` takes one off). Flags live on the cells: they move with inserted or deleted rows, copy and paste, and fill.
 
+## Read
 
 ```sh
 sheets ls                                  # id, name, tabs with used range, version, last edit
@@ -51,6 +52,25 @@ sheets fill runs A2:A4 A5:A40              # continue a pattern, like dragging t
 - Text that starts with `=` but is not a formula: prefix an apostrophe (`'=not a formula`).
 - Set `SHEETS_ACTOR=<your name>` so Garrett can tell who changed what (default `agent`).
 - `sheets watch <book>` prints every change as it happens, including Garrett's.
+
+## History: see, compare, undo
+
+Every change is kept with who made it. Reverts and restores are new changes, so they show up live for everyone and can themselves be reverted.
+
+```sh
+sheets history runs                        # sessions, newest first: id, time, who, what, versions
+sheets history runs M:M --by claude --since 2h --changes   # only column M, only claude, each change listed
+sheets diff runs 120                       # cells that differ between v120 and now (v120 140 for two versions)
+sheets cell-history runs 'Runs!M5'         # every value M5 had, who set it, when
+sheets revert runs s140                    # undo a whole session (or one change: v138, or 136,138)
+sheets revert runs s140 --dry-run          # what would be kept: later edits by others are never overwritten...
+sheets revert runs s140 --force            # ...unless you say so
+sheets restore runs 120                    # the whole workbook back to v120 (--sheet Runs for one sheet)
+sheets checkpoint runs "before int4 run"   # name the current version (--at 120 for an older one)
+sheets history runs --named                # named versions
+```
+
+A session is one person's edits less than 10 minutes apart, even when others edit in between. Revert undoes exactly those changes and keeps everything else, including rows inserted or moved since; cells someone changed later stay as they are and are listed. `history` output is tab-separated; the first line says how to act on it. API: `GET /api/books/<book>/history[?range=&by=&since=]`, `GET .../history/at?v=&from=&only=`, `POST .../history/revert {versions|session, force, dryRun}`, `POST .../history/restore {v, sheet}`, `GET .../history/cell?ref=`, `GET|POST|DELETE .../history/checkpoints`.
 
 ## Format and structure
 
@@ -97,7 +117,7 @@ Moves keep everything attached to the rows or columns (values, formats, flags, s
 
 ## Working on the code
 
-- `npm run build` bundles server, CLI and browser app into `dist/`; `npm test` runs core and API tests; `SHEETS_URL=http://192.168.1.5:8790 npm run e2e` checks the live path and idle cost in headless Chromium; `npm run mobile` checks phones and an iPad (touch emulation).
+- `npm run build` bundles server, CLI and browser app into `dist/`; `npm test` runs core and API tests; `SHEETS_URL=http://192.168.1.5:8790 npm run e2e` checks the live path and idle cost in headless Chromium (`SHEETS_BROWSER=firefox` or `webkit` for the others; it makes and deletes its own workbooks); `npm run mobile` checks phones and an iPad (touch emulation).
 - The service is the systemd user unit `sheets.service` (`systemctl --user restart sheets` after a build). Data lives in `data/sheets.db` (git-ignored).
 - `src/core` is pure and shared by server and browser: A1 utilities, the document model, ops (apply, inverse, transform), the formula engine, display formats. Add a formula function in `src/core/formula/functions.ts` with a test in `test/core.test.ts`.
 - `src/server` is the HTTP API, SSE fan-out and SQLite op log; `src/client` is the browser app (no framework; `grid.ts` is the virtualized grid).

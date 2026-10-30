@@ -6,6 +6,8 @@ import { parseDelimited } from "../core/csv.ts";
 import { describeOp } from "../core/describe.ts";
 import { autofillOps } from "../core/fill.ts";
 import { groupAt } from "../core/flags.ts";
+import { describe as describeChanges, groupSessions, type Mark, type Meta, type Summary } from "../core/history.ts";
+import { cellName } from "../core/a1.ts";
 import { COND_OPS, sheetFromJSON, type CondOp, type CondRule, type SheetJSON, type ViewState } from "../core/model.ts";
 import type { FormatPatch, Op } from "../core/ops.ts";
 
@@ -39,7 +41,7 @@ interface Args {
   flags: Map<string, string | true>;
 }
 
-const BOOL_FLAGS = new Set(["csv", "tsv", "json", "formulas", "desc", "bold", "no-bold", "italic", "no-italic", "strike", "no-strike", "wrap", "no-wrap", "rotate", "no-rotate", "reset", "formats", "copy", "clear", "all", "remove", "off", "yes", "help", "values"]);
+const BOOL_FLAGS = new Set(["csv", "tsv", "json", "formulas", "desc", "bold", "no-bold", "italic", "no-italic", "strike", "no-strike", "wrap", "no-wrap", "rotate", "no-rotate", "reset", "formats", "copy", "clear", "all", "remove", "changes", "named", "force", "dry-run", "off", "yes", "help", "values"]);
 
 function parseArgs(argv: string[]): Args {
   const pos: string[] = [];
@@ -176,6 +178,15 @@ const HELP = `sheets: read and edit workbooks on the sheets server (${SERVER})
   sheets flags [book] [--all]                 flags people left for you, across all workbooks (--all: resolved too)
   sheets flag <book> <range> "note"           flag cells for someone to look at (--remove to take it off)
   sheets resolve <book> <cell> ["reply"]      mark a flag done; the reply shows on it until they dismiss it
+  sheets history <book> [range] [--by actor] [--since 2h|v120|date] [--limit N] [--changes] [--named]
+                                              who changed what, newest first, grouped into sessions
+  sheets diff <book> <v1> [v2]                cells that differ between two versions (v2: now)
+  sheets revert <book> <version|s<id>> [--force] [--dry-run]
+                                              undo one change or a session as a new change; later edits
+                                              by others are kept (and listed) unless --force
+  sheets restore <book> <version> [--sheet S] make the workbook (or one sheet) what it was, as a new change
+  sheets checkpoint <book> "name" [--at v]    name a version ("before int4 run"); --rm <id> removes one
+  sheets cell-history <book> <cell>           every value a cell had, who set it and when
   sheets watch <book>                         print changes as they happen
   sheets ops <book> '<json ops>'              raw ops (see AGENTS.md)
 
@@ -425,6 +436,55 @@ async function main(argv: string[]): Promise<void> {
     }
     case "watch": return watch(rest);
     case "flags": return flags(a, rest);
+    case "history": return historyCmd(a, rest);
+    case "diff": return diffCmd(rest);
+    case "revert": {
+      need(2, "revert <book> <version|s<session>> [--force] [--dry-run]");
+      const b = await info(rest[0]!);
+      const ref = rest[1]!;
+      const versions = ref.split(",").map((x) => Number(x.replace(/^v/, "")));
+      const body = /^s\d+$/.test(ref) ? { session: Number(ref.slice(1)) } : { versions };
+      if (!/^s\d+$/.test(ref) && versions.some((x) => !Number.isInteger(x))) throw new CliError("give a version (v12, 12, 12,15) or a session (s61) from sheets history");
+      const r = await api<{ v: number; reverted: number; skipped: Array<{ what: string; by: string }>; applied: boolean }>("POST", `/api/books/${enc(b.id)}/history/revert`,
+        { ...body, force: a.flags.has("force"), dryRun: a.flags.has("dry-run") });
+      console.log(r.applied ? `reverted ${r.reverted} change${r.reverted === 1 ? "" : "s"} (v${r.v})` : a.flags.has("dry-run") ? `would revert ${r.reverted} change${r.reverted === 1 ? "" : "s"}` : "nothing to revert");
+      for (const x of r.skipped) console.log(`  kept later edits by ${x.by}: ${x.what}`);
+      if (r.skipped.length && !a.flags.has("force")) console.log("  (--force overwrites them too)");
+      return;
+    }
+    case "restore": {
+      need(2, "restore <book> <version> [--sheet S]");
+      const b = await info(rest[0]!);
+      const r = await api<{ v: number; applied: boolean }>("POST", `/api/books/${enc(b.id)}/history/restore`, { v: Number(rest[1]!.replace(/^v/, "")), ...(flag(a, "sheet") ? { sheet: flag(a, "sheet") } : {}) });
+      console.log(r.applied ? `restored ${flag(a, "sheet") ?? b.name} to v${rest[1]!.replace(/^v/, "")} (now v${r.v}; revert v${r.v} to undo)` : "already identical; nothing to restore");
+      return;
+    }
+    case "checkpoint": {
+      need(1, 'checkpoint <book> "name" [--at v] | checkpoint <book> --rm <id>');
+      const b = await info(rest[0]!);
+      if (flag(a, "rm")) {
+        await api("DELETE", `/api/books/${enc(b.id)}/history/checkpoints/${enc(flag(a, "rm")!)}`);
+        return console.log(`removed named version ${flag(a, "rm")}`);
+      }
+      const name = rest.slice(1).join(" ").trim();
+      if (!name) throw new CliError('give a name: sheets checkpoint <book> "before int4 run"');
+      const at = flag(a, "at");
+      const cp = await api<{ id: number; v: number; name: string }>("POST", `/api/books/${enc(b.id)}/history/checkpoints`, { name, ...(at ? { v: Number(at.replace(/^v/, "")) } : {}) });
+      console.log(`named v${cp.v} "${cp.name}" (id ${cp.id})`);
+      return;
+    }
+    case "cell-history": {
+      need(2, "cell-history <book> <cell>");
+      const b = await info(rest[0]!);
+      const r = await api<{ ref: string; now: string | null; oldest: number; entries: Array<{ v: number; actor: string; ts: number; value: string | null; before?: string | null; meta?: Meta }> }>(
+        "GET", `/api/books/${enc(b.id)}/history/cell?ref=${enc(rest[1]!)}`);
+      console.log(`# ${b.name} / ${r.ref} now ${JSON.stringify(r.now ?? "")}. Set an old value back: sheets set ${JSON.stringify(b.name)} ${r.ref} '<value>'`);
+      for (const e of r.entries) console.log(`v${e.v}\t${stamp(e.ts)}\t${e.actor}\t${e.value === null ? "(cleared)" : JSON.stringify(e.value)}${e.meta ? `\t(${e.meta.kind})` : ""}`);
+      const last = r.entries.at(-1);
+      if (last && last.before !== undefined) console.log(`before v${last.v}\t\t\t${last.before === null ? "(empty)" : JSON.stringify(last.before)}`);
+      if (!r.entries.length) console.log(`no recorded edits (history starts at v${r.oldest})`);
+      return;
+    }
     case "flag": {
       need(2, 'flag <book> <range> "note" | flag <book> <range> --remove');
       const b = await info(rest[0]!);
@@ -566,6 +626,73 @@ async function tab(a: Args, rest: string[]): Promise<void> {
   } else throw new CliError(`unknown tab command "${sub}"`);
   const v = await ops(b, [op]);
   console.log(`${describeOp(op, (id) => b.sheets.find((s) => s.id === id)?.name ?? id)} (v${v})`);
+}
+
+/** "Oct 30 14:02" in local time. */
+function stamp(ts: number): string {
+  const d = new Date(ts);
+  const p = (n: number) => String(n).padStart(2, "0");
+  return `${d.toLocaleString("en-US", { month: "short" })} ${d.getDate()} ${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+
+interface HistoryResponse {
+  version: number;
+  oldest: number;
+  more: boolean;
+  sheets: Record<string, string>;
+  summaries: Summary[];
+  checkpoints: Array<{ id: number; v: number; name: string; actor: string; ts: number }>;
+}
+
+async function historyCmd(a: Args, rest: string[]): Promise<void> {
+  if (!rest[0]) throw new CliError("usage: sheets history <book> [range] [--by actor] [--since 2h] [--changes] [--named]");
+  const b = await info(rest[0]);
+  const qs = new URLSearchParams();
+  if (rest[1]) qs.set("range", rest[1]);
+  if (flag(a, "by")) qs.set("by", flag(a, "by")!);
+  if (flag(a, "since")) qs.set("since", flag(a, "since")!);
+  const h = await api<HistoryResponse>("GET", `/api/books/${enc(b.id)}/history?${qs}`);
+  const multi = Object.keys(h.sheets).length > 1;
+  const name = (id: string) => (multi ? h.sheets[id] ?? null : null);
+  if (a.flags.has("named")) {
+    if (!h.checkpoints.length) return console.log("no named versions (sheets checkpoint <book> \"name\")");
+    for (const c of h.checkpoints) console.log(`v${c.v}\t${stamp(c.ts)}\t"${c.name}"\t${c.actor}\t(id ${c.id})`);
+    return;
+  }
+  const limit = Number(flag(a, "limit") ?? 30);
+  const sessions = groupSessions(h.summaries).slice(0, limit);
+  const span = (x: number, y: number) => (x === y ? `v${x}` : `v${x}-${y}`);
+  console.log(`# ${b.name}: ${sessions.length} session${sessions.length === 1 ? "" : "s"} shown, now v${h.version}${rest[1] ? `, touching ${rest[1]}` : ""}. Revert: sheets revert <book> <s-id|version>. Inspect: sheets diff <book> <v>`);
+  const cps = [...h.checkpoints];
+  for (const ses of sessions) {
+    while (cps.length && cps[0]!.v >= ses.last) {
+      const c = cps.shift()!;
+      console.log(`* v${c.v} named "${c.name}" (${c.actor}, ${stamp(c.ts)})`);
+    }
+    const time = stamp(ses.start) + (ses.end - ses.start > 60_000 ? `-${stamp(ses.end).slice(-5)}` : "");
+    const note = ses.sums.some((x) => !x.undoable) ? "  [before history; can't revert]" : "";
+    console.log(`${ses.id}\t${time}\t${ses.actor}\t${describeChanges(ses.sums, name, stamp)}\t(${span(ses.first, ses.last)}, ${ses.versions.length} change${ses.versions.length === 1 ? "" : "s"})${note}`);
+    if (a.flags.has("changes") && ses.versions.length > 1) {
+      for (const x of [...ses.sums].reverse()) console.log(`  v${x.v}\t${stamp(x.ts)}\t${describeChanges([x], name, stamp)}`);
+    }
+  }
+  for (const c of cps) console.log(`* v${c.v} named "${c.name}" (${c.actor}, ${stamp(c.ts)})`);
+  if (h.more || groupSessions(h.summaries).length > limit) console.log(`(older sessions not shown: --limit N or --since)`);
+}
+
+async function diffCmd(rest: string[]): Promise<void> {
+  if (rest.length < 2) throw new CliError("usage: sheets diff <book> <v1> [v2]");
+  const b = await info(rest[0]!);
+  const v1 = Number(rest[1]!.replace(/^v/, "")), v2 = rest[2] ? Number(rest[2].replace(/^v/, "")) : b.version;
+  const r = await api<{ v: number; marks: Mark[]; doc: { sheets: Array<{ id: string; name: string }> } }>("GET", `/api/books/${enc(b.id)}/history/at?v=${v2}&from=${v1}`);
+  const names = new Map(r.doc.sheets.map((s) => [s.id, s.name]));
+  console.log(`# ${b.name}: ${r.marks.length} cell${r.marks.length === 1 ? "" : "s"} differ between v${v1} and v${r.v}${r.v === b.version ? " (now)" : ""}; positions as of v${r.v}`);
+  const show = (x: string | null) => (x === null ? "(empty)" : JSON.stringify(x));
+  for (const m of r.marks.slice(0, 500)) {
+    const extra = [m.fmt ? "format" : "", m.flag ? "flag" : ""].filter(Boolean).join(", ");
+    console.log(`${names.size > 1 ? `${names.get(m.s)}!` : ""}${cellName(m.r, m.c)}\t${m.before === m.after ? "(same value)" : `${show(m.before)} -> ${show(m.after)}`}${extra ? `\t(${extra} changed)` : ""}`);
+  }
+  if (r.marks.length > 500) console.log(`... and ${r.marks.length - 500} more`);
 }
 
 interface FlagRow {

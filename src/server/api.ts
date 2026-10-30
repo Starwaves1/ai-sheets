@@ -8,6 +8,8 @@ import { isFormula, moveRefs } from "../core/formula/rewrite.ts";
 import { findSheet, newSheet, OpError, sheetToJSON, usedRange, type Sheet } from "../core/model.ts";
 import type { FormatPatch, Op } from "../core/ops.ts";
 import { flagGroups } from "../core/flags.ts";
+import type { Meta } from "../core/history.ts";
+import { history } from "./history.ts";
 import { Hub, newId, type LiveBook } from "./hub.ts";
 
 export interface Actor {
@@ -43,7 +45,7 @@ async function body(req: IncomingMessage): Promise<string> {
   return Buffer.concat(chunks).toString("utf8");
 }
 
-async function json(req: IncomingMessage): Promise<Record<string, unknown>> {
+export async function json(req: IncomingMessage): Promise<Record<string, unknown>> {
   const text = await body(req);
   if (!text) return {};
   try {
@@ -55,7 +57,7 @@ async function json(req: IncomingMessage): Promise<Record<string, unknown>> {
   }
 }
 
-function send(res: ServerResponse, status: number, data: unknown): void {
+export function send(res: ServerResponse, status: number, data: unknown): void {
   const text = JSON.stringify(data);
   res.writeHead(status, { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" });
   res.end(text);
@@ -124,7 +126,7 @@ export function makeApi(hub: Hub) {
     return lb;
   };
 
-  const submit = (lb: LiveBook, ops: Op[], actor: Actor, extra: { base?: number; client?: string; seq?: number } = {}) => {
+  const submit = (lb: LiveBook, ops: Op[], actor: Actor, extra: { base?: number; client?: string; seq?: number; why?: Meta } = {}) => {
     try {
       return lb.submit(hub.store, ops, { actor: actor.name, client: extra.client ?? "", ...extra });
     } catch (e) {
@@ -182,7 +184,10 @@ export function makeApi(hub: Hub) {
       const base = typeof j.base === "number" ? j.base : undefined;
       const client = typeof j.client === "string" ? j.client : "";
       const seq = typeof j.seq === "number" ? j.seq : undefined;
-      const c = submit(lb, ops, actor, { ...(base !== undefined ? { base } : {}), ...(seq !== undefined ? { seq } : {}), client });
+      // Clients may say why (a cell set back from its history); only that kind, kept small.
+      const m = j.meta as Record<string, unknown> | undefined;
+      const why = m && m.kind === "cell" && typeof m.ref === "string" && typeof m.at === "number" ? { kind: "cell" as const, ref: m.ref.slice(0, 80), at: m.at } : undefined;
+      const c = submit(lb, ops, actor, { ...(base !== undefined ? { base } : {}), ...(seq !== undefined ? { seq } : {}), ...(why ? { why } : {}), client });
       return send(res, 200, { v: c.v });
     }
 
@@ -192,6 +197,7 @@ export function makeApi(hub: Hub) {
     }
 
     if (sub === "events" && m === "GET") return events(lb, req, res, q);
+    if (sub === "history") return history(hub, lb, req, res, parts.slice(3), q, actor, (ops, why) => submit(lb, ops, actor, { why }));
     if (sub === "flags" && m === "GET") return send(res, 200, flagsOf(lb, q.get("all") === "1"));
 
     if (sub === "range") {

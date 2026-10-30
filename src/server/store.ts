@@ -5,15 +5,17 @@ import { DatabaseSync } from "node:sqlite";
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import type { DocJSON } from "../core/model.ts";
+import type { Change, Meta } from "../core/history.ts";
 import type { Op } from "../core/ops.ts";
 
-export interface Change {
+export type { Change };
+
+export interface Checkpoint {
+  id: number;
   v: number;
-  ops: Op[];
+  name: string;
   actor: string;
-  client: string;
   ts: number;
-  seq?: number; // client's own counter, used to drop a resent change
 }
 
 export interface BookRow {
@@ -57,6 +59,27 @@ export class Store {
     `);
     const cols = this.db.prepare("PRAGMA table_info(changes)").all() as Array<{ name: string }>;
     if (!cols.some((c) => c.name === "seq")) this.db.exec("ALTER TABLE changes ADD COLUMN seq INTEGER");
+    // History: the inverse of each change (to revert it), why it was made, every snapshot kept
+    // (to rebuild any version from the nearest one), and named versions.
+    if (!cols.some((c) => c.name === "inv")) this.db.exec("ALTER TABLE changes ADD COLUMN inv TEXT");
+    if (!cols.some((c) => c.name === "meta")) this.db.exec("ALTER TABLE changes ADD COLUMN meta TEXT");
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS snaps (
+        book TEXT NOT NULL,
+        v INTEGER NOT NULL,
+        doc TEXT NOT NULL,
+        PRIMARY KEY (book, v)
+      );
+      INSERT OR IGNORE INTO snaps (book, v, doc) SELECT id, snap_version, snapshot FROM books;
+      CREATE TABLE IF NOT EXISTS checkpoints (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        book TEXT NOT NULL,
+        v INTEGER NOT NULL,
+        name TEXT NOT NULL,
+        actor TEXT NOT NULL,
+        ts INTEGER NOT NULL
+      );
+    `);
   }
 
   books(): BookRow[] {
@@ -76,6 +99,7 @@ export class Store {
     this.db
       .prepare("INSERT INTO books (id, name, created, updated, version, snap_version, snapshot) VALUES (?, ?, ?, ?, 0, 0, ?)")
       .run(id, name, now, now, JSON.stringify(doc));
+    this.db.prepare("INSERT OR REPLACE INTO snaps (book, v, doc) VALUES (?, 0, ?)").run(id, JSON.stringify(doc));
   }
 
   /** Record a change and bump the book's version in one transaction. */
@@ -83,8 +107,8 @@ export class Store {
     this.db.exec("BEGIN");
     try {
       this.db
-        .prepare("INSERT INTO changes (book, v, ts, actor, client, ops, seq) VALUES (?, ?, ?, ?, ?, ?, ?)")
-        .run(book, c.v, c.ts, c.actor, c.client, JSON.stringify(c.ops), c.seq ?? null);
+        .prepare("INSERT INTO changes (book, v, ts, actor, client, ops, seq, inv, meta) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)")
+        .run(book, c.v, c.ts, c.actor, c.client, JSON.stringify(c.ops), c.seq ?? null, c.inv ? JSON.stringify(c.inv) : null, c.meta ? JSON.stringify(c.meta) : null);
       this.db.prepare("UPDATE books SET version = ?, updated = ?, name = ? WHERE id = ?").run(c.v, c.ts, name, book);
       this.db.exec("COMMIT");
     } catch (e) {
@@ -94,13 +118,32 @@ export class Store {
   }
 
   snapshot(book: string, version: number, doc: DocJSON): void {
-    this.db.prepare("UPDATE books SET snapshot = ?, snap_version = ? WHERE id = ?").run(JSON.stringify(doc), version, book);
+    const text = JSON.stringify(doc);
+    this.db.prepare("UPDATE books SET snapshot = ?, snap_version = ? WHERE id = ?").run(text, version, book);
+    this.db.prepare("INSERT OR REPLACE INTO snaps (book, v, doc) VALUES (?, ?, ?)").run(book, version, text);
+  }
+
+  /** The newest kept snapshot at or before version v. */
+  snapBefore(book: string, v: number): { v: number; doc: DocJSON } | null {
+    const r = this.db.prepare("SELECT v, doc FROM snaps WHERE book = ? AND v <= ? ORDER BY v DESC LIMIT 1").get(book, v) as { v: number; doc: string } | undefined;
+    return r ? { v: r.v, doc: JSON.parse(r.doc) as DocJSON } : null;
+  }
+
+  /** The oldest version that can be rebuilt (history before it was not kept). */
+  oldestSnap(book: string): number {
+    const r = this.db.prepare("SELECT MIN(v) AS v FROM snaps WHERE book = ?").get(book) as { v: number | null };
+    return r.v ?? 0;
   }
 
   changesSince(book: string, since: number, limit = 100_000): Change[] {
+    return this.changesBetween(book, since, Number.MAX_SAFE_INTEGER, limit);
+  }
+
+  /** Changes with since < v <= upto, oldest first. */
+  changesBetween(book: string, since: number, upto: number, limit = 100_000): Change[] {
     const rows = this.db
-      .prepare("SELECT v, ts, actor, client, ops, seq FROM changes WHERE book = ? AND v > ? ORDER BY v LIMIT ?")
-      .all(book, since, limit) as Array<Record<string, unknown>>;
+      .prepare("SELECT v, ts, actor, client, ops, seq, inv, meta FROM changes WHERE book = ? AND v > ? AND v <= ? ORDER BY v LIMIT ?")
+      .all(book, since, upto, limit) as Array<Record<string, unknown>>;
     return rows.map((r) => ({
       ...(r.seq !== null ? { seq: r.seq as number } : {}),
       v: r.v as number,
@@ -108,7 +151,26 @@ export class Store {
       actor: r.actor as string,
       client: r.client as string,
       ops: JSON.parse(r.ops as string) as Op[],
+      inv: r.inv ? (JSON.parse(r.inv as string) as Op[]) : null,
+      ...(r.meta ? { meta: JSON.parse(r.meta as string) as Meta } : {}),
     }));
+  }
+
+  setInverse(book: string, v: number, inv: Op[]): void {
+    this.db.prepare("UPDATE changes SET inv = ? WHERE book = ? AND v = ?").run(JSON.stringify(inv), book, v);
+  }
+
+  checkpoints(book: string): Checkpoint[] {
+    return this.db.prepare("SELECT id, v, name, actor, ts FROM checkpoints WHERE book = ? ORDER BY v DESC, id DESC").all(book) as unknown as Checkpoint[];
+  }
+
+  addCheckpoint(book: string, v: number, name: string, actor: string, ts: number): Checkpoint {
+    const r = this.db.prepare("INSERT INTO checkpoints (book, v, name, actor, ts) VALUES (?, ?, ?, ?, ?)").run(book, v, name, actor, ts);
+    return { id: Number(r.lastInsertRowid), v, name, actor, ts };
+  }
+
+  removeCheckpoint(book: string, id: number): boolean {
+    return this.db.prepare("DELETE FROM checkpoints WHERE book = ? AND id = ?").run(book, id).changes > 0;
   }
 
   /** Soft delete: the row and its history stay in the file. */
