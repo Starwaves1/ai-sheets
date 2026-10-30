@@ -401,9 +401,13 @@ export function moveHull(lo: number, hi: number, from: number, n: number, to: nu
   return [Math.min(...ends), Math.max(...ends)];
 }
 
-/** An insertion point (before index p) after a move: it stays just below the row/col above it. */
-function moveGap(p: number, _count: number, from: number, n: number, to: number): number {
-  return p === 0 ? 0 : moveIndex(p - 1, from, n, to) + 1;
+/**
+ * An insertion point (before index p) after a move. It follows the row/col after it, except at
+ * the block's own top edge, where it stays outside the block (in the gap the block left) — the
+ * same choice transform(move, insert) makes, so the two orders converge.
+ */
+function moveGap(p: number, from: number, n: number, to: number): number {
+  return p === from ? (to < from ? from + n : from) : moveIndex(p, from, n, to);
 }
 
 /** Shift one dimension [lo, hi] of a range; null if it is entirely deleted. */
@@ -555,7 +559,7 @@ function moveView(view: ViewState, axis: Axis, map: (i: number) => number): View
 }
 
 /** `op` rewritten to apply after a concurrent move. Coordinates follow the moved rows/cols. */
-function transformPastMove(op: Op, prior: Extract<Op, { t: "move" }>, doc?: Doc): Op | null {
+function transformPastMove(op: Op, prior: Extract<Op, { t: "move" }>, doc?: Doc, priorFirst = true): Op | null {
   if (!("s" in op) || op.t === "renameSheet" || op.t === "moveSheet" || op.t === "deleteSheet") return op;
   const { axis, from, n, to } = prior;
   const row = axis === "row";
@@ -564,7 +568,6 @@ function transformPastMove(op: Op, prior: Extract<Op, { t: "move" }>, doc?: Doc)
   const hull = (lo: number, hi: number) => moveHull(lo, hi, from, n, to);
   const sheet = doc?.sheets.find((s) => s.id === prior.s);
   const homeName = doc?.sheets.find((s) => s.id === op.s)?.name;
-  const count = sheet ? (row ? sheet.rows : sheet.cols) : Infinity;
   const at2 = (r: number, c: number): [number, number] => (sameSheet ? (row ? [map(r), c] : [r, map(c)]) : [r, c]);
   switch (op.t) {
     case "set":
@@ -588,7 +591,9 @@ function transformPastMove(op: Op, prior: Extract<Op, { t: "move" }>, doc?: Doc)
     case "hide":
       return { ...op, idx: op.idx.map(map) };
     case "insert":
-      return { ...op, at: moveGap(op.at, count, from, n, to) };
+      // An insert exactly where the block lands: whichever was ordered first goes first.
+      if (op.at === to && !priorFirst) return { ...op, at: movedStart(from, n, to) };
+      return { ...op, at: moveGap(op.at, from, n, to) };
     case "delete": {
       const [lo, hi] = hull(op.at, op.at + op.n - 1);
       return hi - lo + 1 === op.n ? { ...op, at: lo } : null; // split apart by the move: give up rather than delete extra rows
@@ -596,7 +601,7 @@ function transformPastMove(op: Op, prior: Extract<Op, { t: "move" }>, doc?: Doc)
     case "move": {
       const [lo, hi] = hull(op.from, op.from + op.n - 1);
       if (hi - lo + 1 !== op.n) return null;
-      const t = moveGap(op.to, count, from, n, to);
+      const t = moveGap(op.to, from, n, to);
       return t >= lo && t <= lo + op.n ? null : { ...op, from: lo, to: t };
     }
     default:
@@ -615,7 +620,7 @@ function transformPastMove(op: Op, prior: Extract<Op, { t: "move" }>, doc?: Doc)
  */
 export function transform(op: Op, prior: Op, doc?: Doc, priorFirst = true): Op | null {
   if (prior.t === "deleteSheet") return "s" in op && op.s === prior.s ? null : op;
-  if (prior.t === "move") return transformPastMove(op, prior, doc);
+  if (prior.t === "move") return transformPastMove(op, prior, doc, priorFirst);
   if (prior.t !== "insert" && prior.t !== "delete") return op;
   if (!("s" in op) || op.t === "renameSheet" || op.t === "moveSheet" || op.t === "deleteSheet") return op;
   const n = prior.t === "insert" ? prior.n : -prior.n;

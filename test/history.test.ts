@@ -3,7 +3,7 @@ import { test } from "node:test";
 import { parseRange } from "../src/core/a1.ts";
 import { changedCells, describe, groupSessions, restoreOps, revertOps, summarize, touches, type Change } from "../src/core/history.ts";
 import { docFromJSON, docToJSON, newDoc, type DocJSON } from "../src/core/model.ts";
-import type { Op } from "../src/core/ops.ts";
+import { transformAll, type Op } from "../src/core/ops.ts";
 import { Workbook } from "../src/core/workbook.ts";
 
 /** A tiny server: applies changes in order, keeps inverses and a JSON copy of every version. */
@@ -133,4 +133,42 @@ test("filter by range follows rows through inserts; changed cells skip rows that
   const before = docFromJSON(L.versions[1]!);
   const marks = changedCells(before, L.wb.doc, later.flatMap((c) => c.ops));
   assert.deepEqual(marks.map((m) => `${m.r},${m.c}:${m.before}->${m.after}`), ["2,13:null->1"]); // N3 new; M2 only moved to M3
+});
+
+// ---- review findings: each repro first failed on main ----
+
+const colA = (L: Log, n: number) => Array.from({ length: n }, (_, i) => L.get(`A${i + 1}`));
+
+test("finding 1: undoing a delete after someone moved a nearby row keeps every row", () => {
+  const L = new Log();
+  L.set("g", { A1: "r0", A2: "r1", A3: "r2", A4: "r3", A5: "r4" });
+  const del = L.edit("g", [{ t: "delete", s: "s1", axis: "row", at: 2, n: 1 }]); // [r0,r1,r3,r4]
+  L.edit("c", [{ t: "move", s: "s1", axis: "row", from: 1, n: 1, to: 4 }]); // [r0,r3,r4,r1]
+  L.revert([del]);
+  assert.deepEqual([...colA(L, 5)].sort(), ["r0", "r1", "r2", "r3", "r4"]);
+});
+
+test("finding 1: insert and move converge in either order (property)", () => {
+  const vals = Array.from({ length: 10 }, (_, i) => `r${i}`);
+  let diverged = 0, total = 0;
+  for (let at = 0; at <= 10; at++) for (const ni of [1, 2]) for (let from = 0; from < 10; from++) for (const n of [1, 2, 3]) for (let to = 0; to <= 10; to++) {
+    if (from + n > 10 || (to >= from && to <= from + n)) continue;
+    const base = () => {
+      const wb = new Workbook(newDoc("t"));
+      wb.apply([{ t: "grid", s: "s1", rows: 10, cols: 2 }, { t: "set", s: "s1", cells: vals.map((v, i) => [i, 0, v] as [number, number, string]) }]);
+      return wb;
+    };
+    const ins: Op = { t: "insert", s: "s1", axis: "row", at, n: ni };
+    const mv: Op = { t: "move", s: "s1", axis: "row", from, n, to };
+    const a = base(), b = base();
+    a.apply([ins]);
+    const mv2 = transformAll([mv], [ins], a.doc);
+    a.apply(mv2);
+    b.apply([mv]);
+    b.apply(transformAll([ins], [mv], b.doc, false));
+    const col = (wb: Workbook) => Array.from({ length: 12 }, (_, i) => wb.doc.sheets[0]!.cells.get(i * 16384)?.v ?? "").join(",");
+    total++;
+    if (col(a) !== col(b)) diverged++;
+  }
+  assert.equal(diverged, 0, `${diverged}/${total} insert/move pairs diverge`);
 });
