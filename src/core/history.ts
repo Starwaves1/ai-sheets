@@ -8,8 +8,8 @@
 //   changedCells           cells that differ between two versions, matched across row/col moves
 
 import { cellName, colName, rangeName, type Range } from "./a1.ts";
-import { key, keyCol, keyRow, sheetToJSON, type Doc, type Flag, type Format, type Sheet } from "./model.ts";
-import { moveHull, movedStart, shiftRange, touchedCells, transform, transformAll, type Op } from "./ops.ts";
+import { docFromJSON, docToJSON, key, keyCol, keyRow, sheetToJSON, type Doc, type Flag, type Format, type Sheet } from "./model.ts";
+import { applyAll, moveHull, movedStart, shiftRange, touchedCells, transform, transformAll, type Op } from "./ops.ts";
 
 /** Why a change was made, when it was not a plain edit. Shown instead of the ops. */
 export type Meta =
@@ -317,8 +317,9 @@ function footprint(op: Op): { cells: Map<string, Set<number>>; ranges: Array<{ k
  * overwrote. Each op of `inv` is in the frame its predecessors leave (insert the row, then refill
  * it), so `p0` is carried through the sequence and compared with each op in that op's own frame.
  */
-function pastLater(inv: Op[], p0: Op, doc: Doc, carveOut: boolean): { keep: Op[]; skip: Op[] } {
+function pastLater(inv: Op[], p0: Op, doc: Doc, carveOut: boolean): { keep: Op[]; skip: Op[]; gone: Array<{ s: string; what: string }> } {
   const keep: Op[] = [], skip: Op[] = [];
+  const gone: Array<{ s: string; what: string }> = [];
   let p: Op | null = p0;
   for (const op of inv) {
     if (!p) {
@@ -329,6 +330,7 @@ function pastLater(inv: Op[], p0: Op, doc: Doc, carveOut: boolean): { keep: Op[]
     for (const x of parts.keep) {
       const t = transform(x, p, doc);
       if (t) keep.push(t);
+      if (carveOut) gone.push(...lostTo(x, p));
     }
     for (const x of parts.skip) {
       const t = transform(x, p, doc);
@@ -336,7 +338,19 @@ function pastLater(inv: Op[], p0: Op, doc: Doc, carveOut: boolean): { keep: Op[]
     }
     p = transform(p, op, doc, false);
   }
-  return { keep, skip };
+  return { keep, skip, gone };
+}
+
+/** Cells of `x` (set/fmt/flag) that the delete `p` removed, so their revert has nowhere to go. */
+function lostTo(x: Op, p: Op): Array<{ s: string; what: string }> {
+  if ((x.t !== "set" && x.t !== "fmt" && x.t !== "flag") || !("s" in p) || p.s !== x.s) return [];
+  if (p.t === "deleteSheet") return [{ s: x.s, what: "(sheet deleted since)" }];
+  if (p.t !== "delete") return [];
+  const lost = x.cells.filter(([r, c]) => {
+    const i = p.axis === "row" ? r : c;
+    return i >= p.at && i < p.at + p.n;
+  });
+  return lost.map(([r, c]) => ({ s: x.s, what: `${cellName(r, c)} (deleted since)` }));
 }
 
 /**
@@ -385,6 +399,7 @@ const moveOver = (ops: Op[], prior: Op, doc?: Doc): Op[] => transformAll(ops, [p
 export function revertOps(log: Change[], targets: Set<number>, doc: Doc, force = false): { ops: Op[]; skipped: Skipped[] } {
   const out: Op[] = [];
   const skipped: Array<{ op: Op; by: string }> = [];
+  const gone: Array<{ s: string; what: string; by: string }> = [];
   const chosen = log.filter((c) => targets.has(c.v)).sort((a, b) => b.v - a.v);
   for (const t of chosen) {
     if (!t.inv) throw new Error(`v${t.v} was recorded before history kept undo information; it can't be reverted`);
@@ -397,6 +412,7 @@ export function revertOps(log: Change[], targets: Set<number>, doc: Doc, force =
         const r = pastLater(inv, p, doc, !force && !targets.has(c.v));
         inv = r.keep;
         for (const op of r.skip) skip.push({ op, by: c.actor });
+        for (const g of r.gone) gone.push({ ...g, by: c.actor });
       }
     }
     for (const p of out) {
@@ -406,7 +422,14 @@ export function revertOps(log: Change[], targets: Set<number>, doc: Doc, force =
     out.push(...inv);
     skipped.push(...skip);
   }
-  return { ops: out, skipped: reportSkipped(skipped, doc) };
+  const lost = new Map<string, Skipped>();
+  for (const g of gone) {
+    const k = `${g.s}\u0001${g.by}`;
+    const m = lost.get(k);
+    if (m) m.what += `, ${g.what}`;
+    else lost.set(k, { sheet: g.s, by: g.by, what: g.what });
+  }
+  return { ops: out, skipped: [...reportSkipped(skipped, doc), ...lost.values()] };
 }
 
 function reportSkipped(list: Array<{ op: Op; by: string }>, doc: Doc): Skipped[] {
@@ -434,41 +457,46 @@ function reportSkipped(list: Array<{ op: Op; by: string }>, doc: Doc): Skipped[]
  * position, so the result is exact; it is one ordinary change, so it can be undone or reverted.
  */
 export function restoreOps(cur: Doc, target: Doc, sheetId?: string): Op[] {
-  const ops: Op[] = [];
   const want = sheetId ? target.sheets.filter((s) => s.id === sheetId) : target.sheets;
   if (sheetId && !want.length) throw new Error("that sheet did not exist at that version");
+  // Structural steps run on a scratch copy, so each later step (and the contents diff) sees the
+  // workbook exactly as the earlier ops leave it, including formulas rewritten by renames.
+  const scratch = docFromJSON(docToJSON(cur));
+  const ops: Op[] = [];
+  const run = (op: Op) => {
+    applyAll(scratch, [op]);
+    ops.push(op);
+  };
+  const temp = (id: string) => `restoring ${id} ${Date.now().toString(36)}`;
+  const sheet = (id: string) => scratch.sheets.find((s) => s.id === id);
+  // 1. Sheets that are gone come back, under temporary names (their old names may be taken).
   for (const [i, t] of target.sheets.entries()) {
-    if (!want.includes(t) || cur.sheets.some((s) => s.id === t.id)) continue;
-    ops.push({ t: "addSheet", sheet: sheetToJSON(t), index: i });
+    if (want.includes(t) && !sheet(t.id)) run({ t: "addSheet", sheet: { ...sheetToJSON(t), name: temp(t.id) }, index: i });
   }
-  for (const t of want) {
-    const s = cur.sheets.find((x) => x.id === t.id);
-    if (s) ops.push(...sheetDiff(s, t));
+  // 2. Sheets that did not exist then go (whole-workbook restores only).
+  if (!sheetId) for (const s of [...scratch.sheets]) if (!target.sheets.some((t) => t.id === s.id)) run({ t: "deleteSheet", s: s.id });
+  // 3. Names, through temporary ones so swapped or reused names never collide.
+  const renames = want.filter((t) => sheet(t.id)!.name !== t.name);
+  if (sheetId) {
+    for (const t of renames) if (!scratch.sheets.some((s) => s.id !== t.id && s.name.toLowerCase() === t.name.toLowerCase())) run({ t: "renameSheet", s: t.id, name: t.name });
+  } else {
+    for (const t of renames) if (!sheet(t.id)!.name.startsWith("restoring ")) run({ t: "renameSheet", s: t.id, name: temp(t.id) });
+    for (const t of renames) run({ t: "renameSheet", s: t.id, name: t.name });
   }
+  // 4. Contents, compared with the sheets as they now are.
+  for (const t of want) ops.push(...sheetDiff(sheet(t.id)!, t));
+  // 5. Order and the workbook's name.
   if (!sheetId) {
-    for (const s of cur.sheets) if (!target.sheets.some((t) => t.id === s.id)) ops.push({ t: "deleteSheet", s: s.id });
-    target.sheets.forEach((t, i) => ops.push({ t: "moveSheet", s: t.id, index: i }));
+    target.sheets.forEach((t, i) => {
+      if (scratch.sheets.indexOf(sheet(t.id)!) !== i) run({ t: "moveSheet", s: t.id, index: i });
+    });
     if (cur.name !== target.name) ops.push({ t: "rename", name: target.name });
   }
-  // Drop sheet moves that change nothing (checked against the order the earlier ops leave).
-  const order = cur.sheets.map((s) => s.id);
-  for (const op of ops) {
-    if (op.t === "addSheet") order.splice(Math.min(op.index ?? order.length, order.length), 0, op.sheet.id);
-    if (op.t === "deleteSheet") order.splice(order.indexOf(op.s), 1);
-  }
-  return ops.filter((op) => {
-    if (op.t !== "moveSheet") return true;
-    const from = order.indexOf(op.s);
-    if (from === op.index) return false;
-    order.splice(from, 1);
-    order.splice(op.index, 0, op.s);
-    return true;
-  });
+  return ops;
 }
 
 function sheetDiff(s: Sheet, t: Sheet): Op[] {
   const ops: Op[] = [];
-  if (s.name !== t.name) ops.push({ t: "renameSheet", s: s.id, name: t.name });
   const vals: Array<[number, number, string | null]> = [], fmts: Array<[number, number, Format | null]> = [], flags: Array<[number, number, Flag | null]> = [];
   const same = (a: unknown, b: unknown) => JSON.stringify(a ?? null) === JSON.stringify(b ?? null);
   for (const k of new Set([...s.cells.keys(), ...t.cells.keys()])) {

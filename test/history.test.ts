@@ -196,3 +196,25 @@ test("finding 3: reverting a delete does not fight a later sort, filter, fill ru
   assert.equal(L.wb.doc.sheets[0]!.frozenRows, 1);
   assert.deepEqual(colA(L, 4), ["h", "b", "a", "c"]);
 });
+
+test("nit: reverting an edit whose row was deleted since says so", () => {
+  const L = new Log();
+  L.set("g", { A1: "a", A2: "b", A3: "c" });
+  const v = L.set("bot", { B2: "x" });
+  L.edit("g", [{ t: "delete", s: "s1", axis: "row", at: 1, n: 1 }]);
+  const plan = L.revert([v]);
+  assert.deepEqual(plan.skipped, [{ sheet: "s1", by: "g", what: "B2 (deleted since)" }]);
+});
+
+test("nit: restore works when a deleted sheet's old name is now held by another sheet", () => {
+  const L = new Log();
+  L.set("g", { A1: "keep" });
+  const v = L.changes.length;
+  L.edit("g", [{ t: "renameSheet", s: "s1", name: "Old" }]);
+  L.edit("g", [{ t: "addSheet", sheet: { id: "s2", name: "Sheet1", rows: 10, cols: 5, cells: [[0, 0, "=Old!A1"]] } }]);
+  L.edit("g", [{ t: "set", s: "s1", cells: [[1, 0, "=Sheet1!A1"]] }]);
+  const ops = restoreOps(L.wb.doc, docFromJSON(L.versions[v]!));
+  L.wb.apply(ops);
+  const norm = (j: DocJSON) => JSON.stringify({ ...j, sheets: j.sheets.map((sh) => ({ ...sh, cells: [...sh.cells].sort((x, y) => x[0] - y[0] || x[1] - y[1]) })) });
+  assert.equal(norm(docToJSON(L.wb.doc)), norm(L.versions[v]!));
+});
