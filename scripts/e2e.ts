@@ -213,6 +213,67 @@ try {
   check((await cli("get", book.id, "F12:H12", "--csv")) === ",,\n", "a fill is one undoable change");
   await cli("clear", book.id, "B12:H18");
 
+  // Browser and OS shortcuts pass through: with the grid focused, none of these keydowns is
+  // default-prevented (synthetic events: they never really reload or close anything). Ours still are.
+  const KEYS = (mac: boolean) => {
+    const M = mac ? "metaKey" : "ctrlKey";
+    const k = (key: string, mods: string[] = [], code?: string) => ({ key, code: code ?? (key.length === 1 ? `Key${key.toUpperCase()}` : key), mods });
+    const essentials = [
+      k("r", [M]), k("R", [M, "shiftKey"]), k("F5"), k("t", [M]), k("w", [M]), k("n", [M]), k("T", [M, "shiftKey"]),
+      k("Tab", ["ctrlKey"]), k("Tab", ["ctrlKey", "shiftKey"]), k("1", [M], "Digit1"), k("9", [M], "Digit9"), k("l", [M]), k("d", [M]),
+      k("=", [M], "Equal"), k("-", [M], "Minus"), k("0", [M], "Digit0"), k("p", [M]), k("f", [M]), k("g", [M]), k("h", [M]),
+      k("I", [M, mac ? "altKey" : "shiftKey"]), k("J", [M, mac ? "altKey" : "shiftKey"]), k("F12"), k("F11"), k("F6"), k("F3"),
+      ...(mac
+        ? [k("y", [M]), k("[", [M], "BracketLeft"), k("]", [M], "BracketRight"), k("q", [M]), k("m", [M]), k(",", [M], "Comma"),
+          k("a", ["ctrlKey"]), k("e", ["ctrlKey"]), k("k", ["ctrlKey"]), k("ArrowLeft", ["ctrlKey"]), k("ArrowRight", ["ctrlKey"])]
+        : [k("PageDown", ["ctrlKey"]), k("PageUp", ["ctrlKey"]), k("ArrowLeft", ["altKey"]), k("ArrowRight", ["altKey"]), k("Home", ["altKey"]),
+          k("d", ["altKey"]), k("u", [M]), k("h", [M]), k("j", [M]), k("k", [M]), k("o", [M]), k("s", [M]), k("e", [M]), k("ArrowUp", ["metaKey"])]),
+    ];
+    const ours = [k("ArrowDown"), k("b", [M]), k("b", [M]), k("i", [M]), k("i", [M]), k("z", [M]), k("Z", [M, "shiftKey"]), k("a", [M]), ...(mac ? [] : [k("y", [M])])];
+    return { essentials, ours };
+  };
+  const pressAll = (p: typeof page, mac: boolean) => p.evaluate((sets) => {
+    const t = document.querySelector(".kbd-proxy")!;
+    const send = (x: { key: string; code: string; mods: string[] }) =>
+      !t.dispatchEvent(new KeyboardEvent("keydown", { key: x.key, code: x.code, bubbles: true, cancelable: true, ...Object.fromEntries(x.mods.map((m) => [m, true])) }));
+    const name = (x: { key: string; mods: string[] }) => [...x.mods.map((m) => m.replace("Key", "")), x.key].join("+");
+    return { taken: sets.essentials.filter(send).map(name), missed: sets.ours.filter((x) => !send(x)).map(name) };
+  }, KEYS(mac));
+  await goto("H20");
+  const linux = await pressAll(page, false);
+  await page.keyboard.press("Escape");
+  const macCtx = await browser.newContext({ viewport: { width: 1280, height: 800 } });
+  await macCtx.addInitScript(() => Object.defineProperty(Navigator.prototype, "platform", { get: () => "MacIntel" }));
+  const macPage = await macCtx.newPage();
+  await macPage.goto(`${BASE}/b/${book.id}`, { waitUntil: "networkidle" });
+  await macPage.waitForSelector(".live.live");
+  const macHint = await macPage.getAttribute(".tool[aria-label^='Redo']", "title");
+  const mac = await pressAll(macPage, true);
+  await macCtx.close();
+  check(!linux.taken.length && !linux.missed.length, "Windows/Linux: browser shortcuts pass through; ours still work",
+    `taken: ${linux.taken.join(" ") || "none"}; not handled: ${linux.missed.join(" ") || "none"}`);
+  check(!mac.taken.length && !mac.missed.length && macHint === "Redo (⌘⇧Z)", "Mac: browser shortcuts pass through; ours use ⌘",
+    `taken: ${mac.taken.join(" ") || "none"}; not handled: ${mac.missed.join(" ") || "none"}; redo hint ${macHint}`);
+
+  // Native text editing inside the cell editor: word jumps and select-all act on the text.
+  await goto("H21");
+  await page.keyboard.type("hello world");
+  await page.keyboard.press(`${MODK}+ArrowLeft`);
+  const caret = await page.evaluate(() => { const e = document.querySelector(".editor") as HTMLTextAreaElement; return [e.hidden, e.selectionStart, e.value]; });
+  await page.keyboard.press(`${MODK}+A`);
+  const sel = await page.evaluate(() => { const e = document.querySelector(".editor") as HTMLTextAreaElement; return [e.selectionStart, e.selectionEnd]; });
+  await page.keyboard.press("Escape");
+  check(caret[0] === false && caret[1] !== 11 && caret[2] === "hello world" && sel[0] === 0 && sel[1] === 11,
+    "in the cell editor, modifier+arrow moves the caret and select-all selects the text", `${JSON.stringify(caret)} ${JSON.stringify(sel)}`);
+  // Right-click opens our menu; Shift+right-click leaves the browser's own.
+  const h21 = await cellCenter("H", "21");
+  await page.mouse.click(h21.x, h21.y, { button: "right" });
+  const ourMenu = await page.evaluate(() => !!document.querySelector(".popup.menu"));
+  await page.keyboard.press("Escape");
+  const shiftPrevented = await page.evaluate(([x, y]) => !document.querySelector(".scroller")!.dispatchEvent(
+    new MouseEvent("contextmenu", { clientX: x, clientY: y, shiftKey: true, bubbles: true, cancelable: true })), [h21.x, h21.y] as const);
+  check(ourMenu && !shiftPrevented && !(await page.evaluate(() => !!document.querySelector(".popup.menu"))), "right-click opens the sheet menu; Shift+right-click is left to the browser");
+
   // 3. idle cost
   await page.waitForTimeout(2200); // let the highlight fade finish
   // Layout and style-recalc counters come from Chromium's DevTools protocol; other browsers check timers and animations only.

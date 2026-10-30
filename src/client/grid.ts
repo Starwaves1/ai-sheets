@@ -690,6 +690,7 @@ export class Grid {
   }
 
   private contextMenu(e: MouseEvent): void {
+    if (e.shiftKey) return; // Shift+right-click: the browser's own menu
     e.preventDefault();
     if (performance.now() - this.lastLongPress < 1000) return; // Android also fires this after our long-press
     const t = this.hit(e);

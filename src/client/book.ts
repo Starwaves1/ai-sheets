@@ -14,8 +14,11 @@ import { Grid, union, type DisplayRect, type Pos } from "./grid.ts";
 import { colorPicker, CondPanel, filterPopover, menu, menuBelow, type MenuItem } from "./popups.ts";
 import { Session, type ChangeEvent } from "./session.ts";
 
-const isMac = navigator.platform.startsWith("Mac");
+// Shortcuts use the platform's command key: Cmd on Apple devices, Ctrl elsewhere. Anything not
+// listed in bindKeysOn (reload, tabs, zoom, find, print, bookmarks, devtools...) stays the browser's.
+const isMac = /Mac|iPhone|iPad|iPod/.test(navigator.platform);
 const MOD = isMac ? "⌘" : "Ctrl+";
+const REDO_HINT = isMac ? "⌘⇧Z" : "Ctrl+Y";
 
 interface Clip {
   text: string;
@@ -218,7 +221,7 @@ class BookPage {
     const sep = () => h("span", { class: "tsep", "aria-hidden": "true" });
     return h("div", { class: "toolbar", role: "toolbar", "aria-label": "Formatting" },
       btn("undo", `Undo (${MOD}Z)`, icon(ICONS.undo), () => this.undo(false)),
-      btn("redo", `Redo (${MOD}Shift+Z)`, icon(ICONS.redo), () => this.undo(true)),
+      btn("redo", `Redo (${REDO_HINT})`, icon(ICONS.redo), () => this.undo(true)),
       sep(),
       btn("nf", "Number format", h("span", { class: "nf-label" }, "123", icon(ICONS.caret)), (b) => this.numberMenu(b), "wide"),
       btn("pct", "Format as percent", "%", () => this.style({ nf: "0%" }), "glyph-btn"),
@@ -531,6 +534,7 @@ class BookPage {
       if (e.key === "Escape") this.grid.focusGrid();
       return;
     }
+    if (e.isComposing || e.keyCode === 229) return; // Enter or Esc while an IME is composing is the IME's
     const k = e.key;
     if (k === "Enter" && !e.altKey && !e.ctrlKey && !e.metaKey) {
       e.preventDefault();
@@ -543,13 +547,13 @@ class BookPage {
       t.setRangeText("\n", at, t.selectionEnd, "end");
       this.formula.value = t.value;
       this.sizeEditor();
-    } else if (k === "Tab") {
+    } else if (k === "Tab" && !e.ctrlKey && !e.metaKey && !e.altKey) {
       e.preventDefault();
       this.commitEdit(e.shiftKey ? "left" : "right");
     } else if (k === "Escape") {
       e.preventDefault();
       this.cancelEdit();
-    } else if (this.editing.quick && !isFormula(this.editor.value) && (k === "ArrowUp" || k === "ArrowDown" || k === "ArrowLeft" || k === "ArrowRight")) {
+    } else if (this.editing.quick && !isFormula(this.editor.value) && !e.shiftKey && !e.altKey && !e.ctrlKey && !e.metaKey && (k === "ArrowUp" || k === "ArrowDown" || k === "ArrowLeft" || k === "ArrowRight")) {
       e.preventDefault();
       this.commitEdit(k === "ArrowUp" ? "up" : k === "ArrowDown" ? "down" : k === "ArrowLeft" ? "left" : "right");
     }
@@ -611,9 +615,13 @@ class BookPage {
   private bindKeysOn(target: HTMLElement): void {
     target.addEventListener("keydown", (e) => {
       if (this.editing || e.isComposing) return;
-      const mod = e.ctrlKey || e.metaKey;
+      const mod = isMac ? e.metaKey : e.ctrlKey;
+      // Browser or system shortcuts: Ctrl on a Mac, the Windows key, Alt with anything but a typed
+      // character (Mac Option and Windows AltGr = Ctrl+Alt type characters; plain Alt+letter is a menu key).
+      const foreign = (isMac ? e.ctrlKey : e.metaKey) || (e.altKey && (e.key.length !== 1 || (!isMac && !e.ctrlKey)));
       const k = e.key;
       const arrows: Record<string, [number, number]> = { ArrowUp: [-1, 0], ArrowDown: [1, 0], ArrowLeft: [0, -1], ArrowRight: [0, 1] };
+      if (foreign) return; // Alt+Left is Back, Ctrl+Tab and Ctrl+PageDown switch tabs, Mac Ctrl+arrows switch spaces
       if (arrows[k]) {
         e.preventDefault();
         this.move(arrows[k][0], arrows[k][1], e.shiftKey, mod);
@@ -626,7 +634,7 @@ class BookPage {
           if (e.shiftKey) this.move(-1, 0, false);
           else this.startEdit(null, false);
           return;
-        case k === "Tab":
+        case k === "Tab" && !mod:
           e.preventDefault();
           this.move(0, e.shiftKey ? -1 : 1, false);
           return;
@@ -653,7 +661,7 @@ class BookPage {
           else g.selectDisplay(i, used.j);
           return;
         }
-        case k === "PageDown" || k === "PageUp":
+        case (k === "PageDown" || k === "PageUp") && !mod:
           e.preventDefault();
           this.move((k === "PageDown" ? 1 : -1) * g.pageRows, 0, e.shiftKey);
           return;
@@ -661,24 +669,25 @@ class BookPage {
           g.select(g.anchor, g.anchor, false);
           return;
       }
-      if (mod && !e.altKey) {
-        const lower = k.toLowerCase();
+      const altGr = !isMac && e.ctrlKey && e.altKey && k.length === 1; // AltGr types characters on Windows
+      if (mod && !altGr) {
+        // Only these; Cmd/Ctrl+C, X and V arrive as clipboard events.
+        const lower = e.shiftKey || e.altKey ? (e.code === "KeyZ" && e.shiftKey && !e.altKey ? "Z" : "") : k.toLowerCase();
         const run: Record<string, () => void> = {
-          z: () => this.undo(e.shiftKey),
-          y: () => this.undo(true),
+          z: () => this.undo(false),
+          Z: () => this.undo(true),
           b: () => this.toggle("b"),
           i: () => this.toggle("i"),
           a: () => g.selectDisplay(0, 0, g.rowCount - 1, g.colCount - 1, false),
-          d: () => this.fill("down"),
-          r: () => this.fill("right"),
         };
+        if (!isMac) run.y = () => this.undo(true); // on a Mac, Cmd+Y opens History
         if (run[lower]) {
           e.preventDefault();
           run[lower]!();
         }
         return;
       }
-      if (k.length === 1 && !e.altKey) {
+      if (k.length === 1) { // includes AltGr and Option characters
         e.preventDefault();
         this.startEdit(k, true);
       }
@@ -758,29 +767,6 @@ class BookPage {
     if (fmts.length) ops.push({ t: "fmt", s: s.id, cells: fmts });
     const end = vals[vals.length - 1];
     if (end && this.submit(ops)) g.select(g.dataOf(r.i1, r.j1), { r: end[0], c: end[1] }, false);
-  }
-
-  /** Ctrl+D / Ctrl+R: copy the first row (or column) of the selection across it. */
-  private fill(dir: "down" | "right"): void {
-    const g = this.grid;
-    const r = g.rect;
-    const s = this.sheet;
-    const vals: Array<[number, number, string | null]> = [];
-    const fmts: Array<[number, number, Format | null]> = [];
-    const i1 = dir === "down" && r.i1 === r.i2 ? Math.max(0, r.i1 - 1) : r.i1;
-    const j1 = dir === "right" && r.j1 === r.j2 ? Math.max(0, r.j1 - 1) : r.j1;
-    for (let i = i1; i <= r.i2; i++) {
-      for (let j = j1; j <= r.j2; j++) {
-        if (dir === "down" ? i === i1 : j === j1) continue;
-        const src = g.dataOf(dir === "down" ? i1 : i, dir === "right" ? j1 : j);
-        const t = g.dataOf(i, j);
-        const cell = s.cells.get(key(src.r, src.c));
-        const v = cell?.v ?? null;
-        vals.push([t.r, t.c, v && isFormula(v) ? moveRefs(v, t.r - src.r, t.c - src.c) : v]);
-        fmts.push([t.r, t.c, cell?.f ?? null]);
-      }
-    }
-    if (vals.length) this.submit([{ t: "set", s: s.id, cells: vals }, { t: "fmt", s: s.id, cells: fmts }]);
   }
 
   /** Fill `target` (display positions) from the pattern in `source`; one undoable change. */
@@ -979,6 +965,7 @@ class BookPage {
       tab.addEventListener("click", () => this.switchSheet(s));
       tab.addEventListener("dblclick", () => this.renameTab(tab, s));
       tab.addEventListener("contextmenu", (e) => {
+        if (e.shiftKey) return; // Shift+right-click: the browser's own menu
         e.preventDefault();
         const doc = this.session.wb.doc;
         const i = doc.sheets.indexOf(s);

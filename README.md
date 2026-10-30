@@ -14,7 +14,7 @@ A small, self-hosted spreadsheet for a person and their AI agents working on the
 ## What it does
 
 - Workbooks with multiple tabs; a virtualized grid that stays smooth with 50k+ cells.
-- Click, shift-click and drag selection; type to edit; Enter, Tab, arrows, Esc, F2, Delete; Ctrl+arrow jumps; Ctrl+D / Ctrl+R fill.
+- Click, shift-click and drag selection; type to edit; Enter, Tab, arrows, Esc, F2, Delete; Ctrl/⌘+arrow jumps. Browser shortcuts (reload, tabs, zoom, find, print, bookmarks) are never taken over.
 - A fill handle on the selection continues patterns (1, 2, 3; Item 1, Item 2; Mon, Tue; repeating cycles); Ctrl or Alt while dragging copies instead. On touch, long-press a selection with empty cells after the data and choose Autofill.
 - Copy and paste as TSV, compatible with Google Sheets and Excel. Pasted formulas shift their relative references.
 - Undo and redo of your own edits, even while others are editing.
