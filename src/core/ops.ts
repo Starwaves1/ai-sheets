@@ -5,7 +5,7 @@
 //   transform(op, prior)  rewrites op made concurrently with `prior` so it applies after it
 
 import type { Range } from "./a1.ts";
-import { isFormula, renameSheetRefs, shiftRefs } from "./formula/rewrite.ts";
+import { isFormula, permuteRefs, renameSheetRefs, shiftRefs } from "./formula/rewrite.ts";
 import {
   COND_OPS, FORMAT_KEYS, getSheet, key, keyCol, keyRow, OpError, sheetFromJSON, sheetToJSON,
   type CondRule, type Doc, type Flag, type Format, type Sheet, type SheetJSON, type ViewState,
@@ -21,6 +21,8 @@ export type Op =
   | { t: "style"; s: string; range: Range; patch: FormatPatch }
   | { t: "insert"; s: string; axis: Axis; at: number; n: number }
   | { t: "delete"; s: string; axis: Axis; at: number; n: number }
+  /** Move rows/cols [from, from+n) to before index `to` (counted before the move); to is outside [from, from+n]. */
+  | { t: "move"; s: string; axis: Axis; from: number; n: number; to: number }
   | { t: "size"; s: string; axis: Axis; sizes: Array<[number, number | null]> }
   | { t: "hide"; s: string; axis: Axis; idx: number[]; hidden: boolean }
   | { t: "freeze"; s: string; rows: number; cols: number }
@@ -164,6 +166,20 @@ export function apply(doc: Doc, op: Op): Applied {
       for (const [sid, cells] of changed) inverse.push({ t: "set", s: sid, cells });
       if (sizes.length) inverse.push({ t: "size", s: sh.id, axis: op.axis, sizes });
       if (hidden.length) inverse.push({ t: "hide", s: sh.id, axis: op.axis, idx: hidden, hidden: true });
+      inverse.push(...restore);
+      return { inverse, dirty: "all" };
+    }
+    case "move": {
+      const sh = getSheet(doc, op.s);
+      checkMove(sh, op.axis, op.from, op.n, op.to);
+      const restore: Op[] = [
+        { t: "cond", s: sh.id, rules: structuredClone(sh.cond) },
+        { t: "view", s: sh.id, view: sh.view ? structuredClone(sh.view) : null },
+      ];
+      const changed = permute(doc, sh, op.axis, op.from, op.n, op.to);
+      const start = movedStart(op.from, op.n, op.to);
+      const inverse: Op[] = [{ t: "move", s: op.s, axis: op.axis, from: start, n: op.n, to: start > op.from ? op.from : op.from + op.n }];
+      for (const [sid, cells] of changed) inverse.push({ t: "set", s: sid, cells });
       inverse.push(...restore);
       return { inverse, dirty: "all" };
     }
@@ -324,6 +340,14 @@ function checkSpan(sh: Sheet, axis: Axis, at: number, n: number, insert: boolean
   }
 }
 
+function checkMove(sh: Sheet, axis: Axis, from: number, n: number, to: number): void {
+  const count = axis === "row" ? sh.rows : sh.cols;
+  if (![from, n, to].every(Number.isInteger) || n < 1 || from < 0 || from + n > count || to < 0 || to > count) {
+    throw new OpError(`cannot move ${n} ${axis}s from ${from} to ${to}`);
+  }
+  if (to >= from && to <= from + n) throw new OpError("that move leaves everything where it is");
+}
+
 function setFormat(sh: Sheet, r: number, c: number, f: Format | null): void {
   const k = key(r, c);
   const cell = sh.cells.get(k);
@@ -352,6 +376,34 @@ export function shiftIndex(i: number, at: number, n: number): number | null {
   const end = at - n;
   if (i >= at && i < end) return null;
   return i >= end ? i + n : i;
+}
+
+/** Where the first moved row/col ends up. */
+export const movedStart = (from: number, n: number, to: number): number => (to <= from ? to : to - n);
+
+/** New index of row/col i after moving [from, from+n) to before `to`. */
+export function moveIndex(i: number, from: number, n: number, to: number): number {
+  if (i >= from && i < from + n) return movedStart(from, n, to) + (i - from);
+  if (to <= from) return i >= to && i < from ? i + n : i;
+  return i >= from + n && i < to ? i - n : i;
+}
+
+/** Smallest span covering where the rows/cols in [lo, hi] went. */
+export function moveHull(lo: number, hi: number, from: number, n: number, to: number): [number, number] {
+  const ends: number[] = [];
+  const end = from + n - 1;
+  // Inside the block, and outside it, the mapping is increasing: the extremes are the ends of each part.
+  const bLo = Math.max(lo, from), bHi = Math.min(hi, end);
+  if (bLo <= bHi) ends.push(moveIndex(bLo, from, n, to), moveIndex(bHi, from, n, to));
+  const oLo = lo >= from && lo <= end ? end + 1 : lo;
+  const oHi = hi >= from && hi <= end ? from - 1 : hi;
+  if (oLo <= oHi) ends.push(moveIndex(oLo, from, n, to), moveIndex(oHi, from, n, to));
+  return [Math.min(...ends), Math.max(...ends)];
+}
+
+/** An insertion point (before index p) after a move; the end of the sheet stays the end. */
+function moveGap(p: number, count: number, from: number, n: number, to: number): number {
+  return p >= count ? p : moveIndex(p, from, n, to);
 }
 
 /** Shift one dimension [lo, hi] of a range; null if it is entirely deleted. */
@@ -445,6 +497,113 @@ function shift(doc: Doc, sh: Sheet, axis: Axis, at: number, n: number): Map<stri
   return changed;
 }
 
+/**
+ * Move rows/cols [from, from+n) to before `to` in `sh`, rewriting formulas everywhere.
+ * Returns the old text of every formula whose text changed, by sheet id, at pre-move coordinates.
+ */
+function permute(doc: Doc, sh: Sheet, axis: Axis, from: number, n: number, to: number): Map<string, Array<[number, number, string]>> {
+  const row = axis === "row";
+  const map = (i: number) => moveIndex(i, from, n, to);
+  const hull = (lo: number, hi: number) => moveHull(lo, hi, from, n, to);
+  const changed = new Map<string, Array<[number, number, string]>>();
+  for (const s of doc.sheets) {
+    for (const [k, cell] of s.cells) {
+      if (!isFormula(cell.v)) continue;
+      const next = permuteRefs(cell.v, s.name, sh.name, axis, map, hull);
+      if (next === cell.v) continue;
+      let list = changed.get(s.id);
+      if (!list) changed.set(s.id, (list = []));
+      list.push([keyRow(k), keyCol(k), cell.v]);
+      cell.v = next;
+    }
+  }
+  const cells: Sheet["cells"] = new Map();
+  for (const [k, cell] of sh.cells) {
+    const r = keyRow(k), c = keyCol(k);
+    cells.set(row ? key(map(r), c) : key(r, map(c)), cell);
+  }
+  sh.cells = cells;
+  const remap = <T>(m: Map<number, T>) => new Map([...m].map(([i, v]) => [map(i), v] as [number, T]));
+  if (row) {
+    sh.rowH = remap(sh.rowH);
+    sh.hiddenRows = new Set([...sh.hiddenRows].map(map));
+  } else {
+    sh.colW = remap(sh.colW);
+    sh.hiddenCols = new Set([...sh.hiddenCols].map(map));
+  }
+  sh.cond = sh.cond.map((rule) => ({ ...rule, range: hullRange(rule.range, axis, hull) }));
+  if (sh.view) sh.view = moveView(sh.view, axis, map);
+  return changed;
+}
+
+function hullRange(g: Range, axis: Axis, hull: (lo: number, hi: number) => [number, number]): Range {
+  if (axis === "row") {
+    const [r1, r2] = hull(g.r1, g.r2);
+    return { ...g, r1, r2 };
+  }
+  const [c1, c2] = hull(g.c1, g.c2);
+  return { ...g, c1, c2 };
+}
+
+function moveView(view: ViewState, axis: Axis, map: (i: number) => number): ViewState {
+  if (axis === "row") return { ...view, headerRow: map(view.headerRow) };
+  const filters: ViewState["filters"] = {};
+  for (const [c, f] of Object.entries(view.filters)) filters[map(Number(c))] = f;
+  const out: ViewState = { headerRow: view.headerRow, filters };
+  if (view.sort) out.sort = { ...view.sort, col: map(view.sort.col) };
+  return out;
+}
+
+/** `op` rewritten to apply after a concurrent move. Coordinates follow the moved rows/cols. */
+function transformPastMove(op: Op, prior: Extract<Op, { t: "move" }>, doc?: Doc): Op | null {
+  if (!("s" in op) || op.t === "renameSheet" || op.t === "moveSheet" || op.t === "deleteSheet") return op;
+  const { axis, from, n, to } = prior;
+  const row = axis === "row";
+  const sameSheet = op.s === prior.s;
+  const map = (i: number) => moveIndex(i, from, n, to);
+  const hull = (lo: number, hi: number) => moveHull(lo, hi, from, n, to);
+  const sheet = doc?.sheets.find((s) => s.id === prior.s);
+  const homeName = doc?.sheets.find((s) => s.id === op.s)?.name;
+  const count = sheet ? (row ? sheet.rows : sheet.cols) : Infinity;
+  const at2 = (r: number, c: number): [number, number] => (sameSheet ? (row ? [map(r), c] : [r, map(c)]) : [r, c]);
+  switch (op.t) {
+    case "set":
+      return { ...op, cells: op.cells.map(([r, c, v]) => [...at2(r, c), isFormula(v ?? undefined) && sheet && homeName ? permuteRefs(v!, homeName, sheet.name, axis, map, hull) : v]) };
+    case "fmt":
+    case "flag":
+      return sameSheet ? ({ ...op, cells: op.cells.map(([r, c, f]) => [...at2(r, c), f]) } as Op) : op;
+    case "style":
+      return sameSheet ? { ...op, range: hullRange(op.range, axis, hull) } : op;
+    case "cond":
+      return sameSheet ? { ...op, rules: op.rules.map((rule) => ({ ...rule, range: hullRange(rule.range, axis, hull) })) } : op;
+    case "view":
+      return sameSheet && op.view ? { ...op, view: moveView(op.view, axis, map) } : op;
+    default:
+      break;
+  }
+  if (!sameSheet || !("axis" in op) || op.axis !== axis) return op;
+  switch (op.t) {
+    case "size":
+      return { ...op, sizes: op.sizes.map(([i, v]) => [map(i), v] as [number, number | null]) };
+    case "hide":
+      return { ...op, idx: op.idx.map(map) };
+    case "insert":
+      return { ...op, at: moveGap(op.at, count, from, n, to) };
+    case "delete": {
+      const [lo, hi] = hull(op.at, op.at + op.n - 1);
+      return hi - lo + 1 === op.n ? { ...op, at: lo } : null; // split apart by the move: give up rather than delete extra rows
+    }
+    case "move": {
+      const [lo, hi] = hull(op.from, op.from + op.n - 1);
+      if (hi - lo + 1 !== op.n) return null;
+      const t = moveGap(op.to, count, from, n, to);
+      return t >= lo && t <= lo + op.n ? null : { ...op, from: lo, to: t };
+    }
+    default:
+      return op;
+  }
+}
+
 // ---- transform --------------------------------------------------------------
 
 /**
@@ -456,6 +615,7 @@ function shift(doc: Doc, sh: Sheet, axis: Axis, at: number, n: number): Map<stri
  */
 export function transform(op: Op, prior: Op, doc?: Doc, priorFirst = true): Op | null {
   if (prior.t === "deleteSheet") return "s" in op && op.s === prior.s ? null : op;
+  if (prior.t === "move") return transformPastMove(op, prior, doc);
   if (prior.t !== "insert" && prior.t !== "delete") return op;
   if (!("s" in op) || op.t === "renameSheet" || op.t === "moveSheet" || op.t === "deleteSheet") return op;
   const n = prior.t === "insert" ? prior.n : -prior.n;
@@ -504,6 +664,15 @@ export function transform(op: Op, prior: Op, doc?: Doc, priorFirst = true): Op |
       }
       const g = shiftSpan(op.at, op.at + op.n - 1, at, n);
       return g ? { ...op, at: g[0], n: g[1] - g[0] + 1 } : null;
+    }
+    case "move": {
+      if (!sameSheet || op.axis !== axis) return op;
+      const g = shiftSpan(op.from, op.from + op.n - 1, at, n);
+      if (!g) return null;
+      const end = at - n; // for a delete: first index after the deleted span
+      const t = n > 0 ? (op.to > at || (op.to === at && priorFirst) ? op.to + n : op.to) : op.to >= end ? op.to + n : op.to > at ? at : op.to;
+      const m = { ...op, from: g[0], n: g[1] - g[0] + 1, to: t };
+      return m.to >= m.from && m.to <= m.from + m.n ? null : m;
     }
     case "size": {
       if (!sameSheet || op.axis !== axis) return op;

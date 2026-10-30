@@ -69,6 +69,9 @@ function validateOp(op: unknown, at: string): void {
     case "delete":
       need(AXES.includes(op.axis as string) && isInt(op.at) && isInt(op.n), `${at}: needs axis, at, n`);
       return;
+    case "move":
+      need(AXES.includes(op.axis as string) && isInt(op.from) && isInt(op.n) && isInt(op.to), `${at}: needs axis, from, n, to`);
+      return;
     case "size":
       need(AXES.includes(op.axis as string) && Array.isArray(op.sizes), `${at}: needs axis and sizes`);
       for (const p of op.sizes as unknown[]) {

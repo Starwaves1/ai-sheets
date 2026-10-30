@@ -63,6 +63,7 @@ sheets freeze runs 1 1                             # rows, columns
 sheets width runs S:BP 28                          # px; `height runs 1:1 200`
 sheets insert runs 5:6                             # two rows before row 5; columns: `insert runs C:C`
 sheets delete runs C:D                             # formulas elsewhere are rewritten, like any spreadsheet
+sheets move runs 5:6 --to 2                        # rows 5-6 become rows 2-3; `move runs C:D --to H` for columns
 sheets hide runs R:R                               # unhide the same way
 sheets sort runs M --desc                          # shared view sort; `sort runs --off`
 sheets filter runs B --hide invalid,smoke          # or: `filter runs K gt 10`; `filter runs --clear`
@@ -92,7 +93,7 @@ Everything the CLI does goes through JSON over HTTP; send `X-Actor: <name>`.
 | `GET /api/books/<book>/events` | server-sent events, one `change` per edit |
 | `GET /api/books/<book>/csv?sheet=Runs` | export |
 
-Raw ops use 0-based row/col indices and sheet ids from the summary, for example `{"t":"insert","s":"<sheet id>","axis":"row","at":4,"n":2}`. The `Op` type in `src/core/ops.ts` lists them all.
+Moves keep everything attached to the rows or columns (values, formats, flags, sizes, hidden state), and references follow them: `=A5` becomes `=A2` when row 5 moves to row 2; a range keeps covering the same rows. Raw ops use 0-based row/col indices and sheet ids from the summary, for example `{"t":"insert","s":"<sheet id>","axis":"row","at":4,"n":2}`. The `Op` type in `src/core/ops.ts` lists them all.
 
 ## Working on the code
 

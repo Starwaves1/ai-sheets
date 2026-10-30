@@ -138,6 +138,10 @@ try {
   // Formula bar: Enter commits and Esc cancels; arrows move the caret; clicking a cell commits and
   // selects it (or, mid-formula, inserts its reference); afterwards typing and the clipboard still work.
   const inputs = async (ref: string) => (await api("GET", `/api/books/${book.id}/range?ref=${ref}&show=inputs`)).values.map((r: string[]) => r.join("|")).join("/");
+  const headCenter = (sel: string, text: string) => page.evaluate(([q, t]) => {
+    const el = [...document.querySelectorAll(q)].find((e) => e.textContent === t)!.getBoundingClientRect();
+    return { x: el.x + el.width / 2, y: el.y + el.height / 2 };
+  }, [sel, text] as const);
   const cellCenter = (col: string, row: string) => page.evaluate(([c, r]) => {
     const f = (sel: string, t: string) => [...document.querySelectorAll(sel)].find((e) => e.textContent === t)!.getBoundingClientRect();
     const a = f(".colhead .h", c), b = f(".rowhead .h", r);
@@ -270,6 +274,39 @@ try {
   check(actors.has("Tester"), "browser edits are attributed to the name you set", [...actors].join(", "));
   await page.click(".flags-panel .icon-btn");
   await cli("delete", book.id, "1:1");
+  // Drag selected headers to move rows and columns; formulas follow; one undoable change.
+  await api("PUT", `/api/books/${book.id}/range?ref=J30`, { values: [["j", "k", "l", "=K30"], ["j2", "k2", "l2", ""]] });
+  await goto("A1");
+  await goto("J33");
+  const headDrag = async (sel: string, from: string, to: { x: number; y: number }) => {
+    const a = await headCenter(sel, from);
+    await page.mouse.click(a.x, a.y); // select the header
+    await page.waitForTimeout(100);
+    await page.mouse.move(a.x, a.y);
+    await page.mouse.down();
+    for (let k = 1; k <= 8; k++) await page.mouse.move(a.x + (to.x - a.x) * k / 8, a.y + (to.y - a.y) * k / 8);
+    const line = await page.evaluate(() => { const g = document.querySelector(".move-guide") as HTMLElement | null; return !!g && !g.hidden; });
+    await page.mouse.up();
+    await page.waitForTimeout(400);
+    return line;
+  };
+  // Column K to between L and M: K's contents land in L, and M30's =K30 now reads =L30.
+  const l = await headCenter(".colhead .h", "L"), m = await headCenter(".colhead .h", "M");
+  const colLine = await headDrag(".colhead .h", "K", { x: (l.x + m.x) / 2 + 2, y: l.y });
+  const colMoved = await inputs("J30:M31");
+  await page.keyboard.press(`${MODK}+Z`);
+  await page.waitForTimeout(400);
+  const colUndone = await inputs("J30:M31");
+  // Row 31 above row 30.
+  const r30 = await headCenter(".rowhead .h", "30");
+  const rowLine = await headDrag(".rowhead .h", "31", { x: r30.x, y: r30.y - 8 });
+  const rowMoved = await inputs("J30:J31");
+  check(colLine && colMoved === "j|l|k|=L30/j2|l2|k2|" && colUndone === "j|k|l|=K30/j2|k2|l2|" && rowLine && rowMoved === "j2/j",
+    "dragging a selected column or row header moves it (drop line shown); formulas follow; undo puts it back",
+    `${colMoved} | ${colUndone} | ${rowMoved} | lines ${colLine} ${rowLine}`);
+  await cli("clear", book.id, "J30:M31");
+  await goto("A1");
+
   // Browser and OS shortcuts pass through: with the grid focused, none of these keydowns is
   // default-prevented (synthetic events: they never really reload or close anything). Ours still are.
   const KEYS = (mac: boolean) => {

@@ -164,6 +164,8 @@ const HELP = `sheets: read and edit workbooks on the sheets server (${SERVER})
   sheets freeze <book> <rows> <cols> [--sheet S]
   sheets width <book> <A:C> <px>  |  sheets height <book> <2:5> <px>
   sheets hide <book> <C:D|3:5>    |  sheets unhide <book> <C:D|3:5>
+  sheets move <book> <5:6|C:D> --to <2|H>     move rows/columns so they start at row 2 / column H;
+                                              formulas, formats, flags and sizes go with them
   sheets insert <book> <5:7|C:D>  (insert before)  |  sheets delete <book> <5:7|C:D>
   sheets sort <book> <col> [--desc] [--header N] [--sheet S]  |  sheets sort <book> --off
   sheets filter <book> <col> --hide v1,v2 | <col> <op> [value]  |  sheets filter <book> --clear
@@ -361,6 +363,26 @@ async function main(argv: string[]): Promise<void> {
       if (cmd === "hide" || cmd === "unhide") {
         op = { t: "hide", s: sheet.id, axis, idx: Array.from({ length: hi - lo + 1 }, (_, i) => lo + i), hidden: cmd === "hide" };
       } else op = { t: cmd, s: sheet.id, axis, at: lo, n: hi - lo + 1 };
+      const v = await ops(b, [op]);
+      console.log(`${describeOp(op, () => sheet.name)} (v${v})`);
+      return;
+    }
+    case "move": {
+      need(2, "move <book> <5:6|C:D> --to <row|column>");
+      const b = await info(rest[0]!);
+      const { sheet, range } = rangeArg(b, rest[1]!);
+      const dest = flag(a, "to");
+      const rows = range.c1 === 0 && range.c2 >= MAX_COLS - 1, cols = range.r1 === 0 && range.r2 >= MAX_ROWS - 1;
+      if (rows === cols || !dest) throw new CliError("give whole rows or columns and a destination: move <book> 5:6 --to 2, move <book> C:D --to H");
+      const axis = rows ? "row" : "col";
+      const from = rows ? range.r1 : range.c1, n = rows ? range.r2 - range.r1 + 1 : range.c2 - range.c1 + 1;
+      const target = parseRange(rows ? `A${dest}` : `${dest}1`);
+      if (!target) throw new CliError(`--to takes a ${rows ? "row number" : "column letter"}`);
+      const start = rows ? target.r1 : target.c1;
+      const count = rows ? sheet.rows : sheet.cols;
+      if (start === from) throw new CliError("they are already there");
+      if (start + n > count) throw new CliError(`the sheet has ${count} ${axis}s`);
+      const op: Op = { t: "move", s: sheet.id, axis, from, n, to: start < from ? start : start + n };
       const v = await ops(b, [op]);
       console.log(`${describeOp(op, () => sheet.name)} (v${v})`);
       return;

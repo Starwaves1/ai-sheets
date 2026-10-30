@@ -48,6 +48,10 @@ export function describeOp(op: Op, sheetName: (id: string) => string, verbose = 
     case "style": return `formatted ${where(op.s)}${rangeName(op.range)} ${JSON.stringify(op.patch)}`;
     case "insert": return `inserted ${span(op.axis, op.at, op.n)} in ${sheetName(op.s)}`;
     case "delete": return `deleted ${span(op.axis, op.at, op.n)} in ${sheetName(op.s)}`;
+    case "move": {
+      const start = op.to <= op.from ? op.to : op.to - op.n;
+      return `moved ${span(op.axis, op.from, op.n)} to ${op.axis === "row" ? `row ${start + 1}` : `column ${colName(start)}`} in ${sheetName(op.s)}`;
+    }
     case "size": return `resized ${op.sizes.length} ${op.axis}${op.sizes.length === 1 ? "" : "s"} in ${sheetName(op.s)}`;
     case "hide": return `${op.hidden ? "hid" : "unhid"} ${op.idx.length} ${op.axis}${op.idx.length === 1 ? "" : "s"} in ${sheetName(op.s)}`;
     case "freeze": return `froze ${op.rows} row${op.rows === 1 ? "" : "s"} and ${op.cols} column${op.cols === 1 ? "" : "s"} in ${sheetName(op.s)}`;

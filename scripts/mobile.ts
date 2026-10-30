@@ -134,6 +134,23 @@ try {
     await page.keyboard.press("Escape");
     await cli("flag", scratch.id, "B3", "--remove");
 
+    // Moving rows on touch: long-press a row header, "Move row down".
+    if (name === "iphone-15") {
+      await page.waitForTimeout(1000);
+      const head = await page.evaluate(() => {
+        const el = [...document.querySelectorAll(".rowhead .h")].find((e) => e.textContent === "2")!.getBoundingClientRect();
+        return { x: el.x + el.width / 2, y: el.y + el.height / 2 };
+      });
+      await cdpLongPress(page, head.x, head.y);
+      const down = page.locator(".menu .item", { hasText: "Move row down" });
+      const offered = await down.count();
+      if (offered) await down.tap();
+      await page.waitForTimeout(400);
+      const order = (await cli("get", scratch.id, "A1:A3", "--csv")).trim().split("\n").join(",");
+      check(offered === 1 && order === "fruit,kiwi,fig", `${name}: long-press a row header, "Move row down"`, order);
+      await cli("move", scratch.id, "3:3", "--to", "2");
+    }
+
     // Autofill on touch: select C2:C6 with 1, 2 at the top, long-press inside, choose "Autofill down".
     if (name === "iphone-15" || name === "ipad") {
       await page.waitForTimeout(1000); // the menu ignores a contextmenu within 1 s of a long press

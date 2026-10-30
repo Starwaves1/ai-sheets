@@ -24,7 +24,7 @@ A small, self-hosted spreadsheet for a person and their AI agents working on the
 - Copy and paste as TSV, compatible with Google Sheets and Excel. Pasted formulas shift their relative references.
 - Undo and redo of your own edits, even while others are editing.
 - Formulas with A1 references, ranges and cross-sheet references: arithmetic, comparison, `&`, `SUM AVERAGE COUNT COUNTA COUNTBLANK MIN MAX MEDIAN PRODUCT IF IFERROR AND OR NOT ROUND ROUNDUP ROUNDDOWN ABS COUNTIF SUMIF AVERAGEIF LEN UPPER LOWER TRIM CONCAT ISBLANK ISNUMBER ISERROR`. Recalculation follows dependencies; errors are `#REF!`, `#DIV/0!`, `#NAME?`, `#VALUE!`, `#CIRC!` (circular reference).
-- Insert and delete rows and columns (formulas everywhere are rewritten), resize, hide and unhide, freeze rows and columns.
+- Insert, delete and move rows and columns (drag a selected header; on touch, long-press it). Formulas everywhere follow. Resize, hide and unhide, freeze rows and columns.
 - Sort and filter as a shared, persisted view that never moves stored data.
 - Bold, italic, strikethrough, text and fill colors, alignment, wrap, rotated header text, number formats (`0.00`, `0%`, `#,##0`, `$#,##0.00`, scientific).
 - Flags for Claude: select cells, press the orange tag, write what an agent should look at. Agents list them with `sheets flags` and resolve them with a reply that stays on the cell until you dismiss it.

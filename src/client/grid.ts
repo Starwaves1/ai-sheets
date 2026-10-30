@@ -33,6 +33,8 @@ export interface GridEvents {
   unhide(axis: "row" | "col", indices: number[]): void;
   /** A click on a cell while a formula is being typed: return true if it was taken as a reference. */
   pick(p: Pos): boolean;
+  /** Dragged the selected display rows/cols [lo, hi] to the gap before display index `gap`. */
+  move(axis: "row" | "col", lo: number, hi: number, gap: number): void;
   /** The mouse moved onto another cell (null: off the cells). */
   hoverCell(p: Pos | null): void;
   fill(source: DisplayRect, target: DisplayRect, alt: boolean): void;
@@ -599,6 +601,15 @@ export class Grid {
 
     const last = { i: this.rows.length - 1, j: this.cols.length - 1 };
     if (t.zone === "corner") return this.selectDisplay(0, 0, last.i, last.j, false);
+    // Pressing on an already selected row or column header and dragging moves those rows/columns.
+    if ((t.zone === "col" || t.zone === "row") && e.button === 0 && !e.shiftKey) {
+      const r = this.rect;
+      const axis = t.zone === "col" ? "col" : "row";
+      const whole = axis === "col" ? r.i1 === 0 && r.i2 === last.i : r.j1 === 0 && r.j2 === last.j;
+      const k = axis === "col" ? t.j : t.i;
+      const [lo, hi] = axis === "col" ? [r.j1, r.j2] : [r.i1, r.i2];
+      if (whole && k >= lo && k <= hi) return this.startMove(axis, lo, hi, e);
+    }
 
     // Filter button in the header row.
     if (t.zone === "cell" && e.button === 0) {
@@ -647,6 +658,58 @@ export class Grid {
       this.dragging = null;
       window.removeEventListener("mousemove", move);
       window.removeEventListener("mouseup", up);
+    };
+    window.addEventListener("mousemove", move);
+    window.addEventListener("mouseup", up);
+  }
+
+  /** Header drag of selected rows/cols: a line shows where they will land; a click without a drag selects one. */
+  private startMove(axis: "row" | "col", lo: number, hi: number, e: MouseEvent): void {
+    const g = this.guide;
+    const x0 = e.clientX, y0 = e.clientY;
+    let gap = -1, moved = false;
+    this.dragging = { kind: axis === "col" ? "cols" : "rows" };
+    const move = (ev: MouseEvent) => {
+      if (!moved && Math.hypot(ev.clientX - x0, ev.clientY - y0) < 5) return;
+      moved = true;
+      this.scroller.style.cursor = "grabbing";
+      const m = this.hit(ev);
+      const W = this.scroller.clientWidth, H = this.scroller.clientHeight;
+      if (axis === "col" && m.x > W - 16) this.scroller.scrollLeft += 24;
+      if (axis === "row" && m.y > H - 16) this.scroller.scrollTop += 24;
+      if (axis === "col" && m.x < HEAD_W + 8) this.scroller.scrollLeft -= 24;
+      if (axis === "row" && m.y < HEAD_H + 8) this.scroller.scrollTop -= 24;
+      // Nearest boundary between display rows/cols.
+      const pos = axis === "col" ? this.colLeft : this.rowTop;
+      const n = axis === "col" ? this.cols.length : this.rows.length;
+      const at = Math.max(0, axis === "col" ? m.sx : m.sy);
+      const k = lowerBound(pos, n, at);
+      gap = at - pos[k]! > (pos[k + 1]! - pos[k]!) / 2 ? k + 1 : k;
+      if (gap >= lo && gap <= hi + 1) {
+        g.hidden = true;
+        return;
+      }
+      const b = axis === "col" ? this.cellBox(0, Math.min(gap, n - 1)) : this.cellBox(Math.min(gap, n - 1), 0);
+      const edge = gap === n ? (axis === "col" ? b.x + b.w : b.y + b.h) : axis === "col" ? b.x : b.y;
+      g.hidden = false;
+      g.className = `resize-guide move-guide ${axis}`;
+      g.style.cssText = axis === "col" ? `left:${edge - 1}px` : `top:${edge - 1}px`;
+    };
+    const up = () => {
+      window.removeEventListener("mousemove", move);
+      window.removeEventListener("mouseup", up);
+      this.dragging = null;
+      this.scroller.style.cursor = "";
+      g.hidden = true;
+      const last = { i: this.rows.length - 1, j: this.cols.length - 1 };
+      if (!moved) {
+        // A plain click on a selected header selects just that row/column.
+        const t = this.hit({ clientX: x0, clientY: y0 });
+        if (axis === "col") this.selectDisplay(0, t.j, last.i, t.j, false);
+        else this.selectDisplay(t.i, 0, t.i, last.j, false);
+        return;
+      }
+      if (gap >= 0 && !(gap >= lo && gap <= hi + 1)) this.ev.move(axis, lo, hi, gap);
     };
     window.addEventListener("mousemove", move);
     window.addEventListener("mouseup", up);

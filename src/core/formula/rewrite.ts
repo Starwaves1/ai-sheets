@@ -89,6 +89,33 @@ export function shiftRefs(
   });
 }
 
+/**
+ * Follow a block move: rows/cols [from, from+n) were moved to before index `to` (pre-move
+ * indexing) on `sheet`. Each reference end follows its row/col; a range becomes the smallest
+ * range covering where its rows went (so a block moved within a range leaves it unchanged).
+ */
+export function permuteRefs(
+  formula: string, homeSheet: string, sheet: string, axis: "row" | "col",
+  map: (i: number) => number, hull: (lo: number, hi: number) => [number, number],
+): string {
+  const k = axis === "row" ? "r" : "c";
+  return rewrite(formula, (ref) => {
+    if (!targets(ref, homeSheet, sheet)) return null;
+    const a = { ...ref.a };
+    if (a[k] === undefined) return null;
+    if (!ref.b) {
+      a[k] = map(a[k]!);
+      return refText(ref.sheet, a);
+    }
+    const b = { ...ref.b };
+    const swap = a[k]! > b[k]!;
+    const [lo, hi] = hull(Math.min(a[k]!, b[k]!), Math.max(a[k]!, b[k]!));
+    a[k] = swap ? hi : lo;
+    b[k] = swap ? lo : hi;
+    return refText(ref.sheet, a, b);
+  });
+}
+
 /** Offset relative references by (dr, dc), as when copying a formula. Out-of-sheet refs become #REF!. */
 export function moveRefs(formula: string, dr: number, dc: number): string {
   if (dr === 0 && dc === 0) return formula;

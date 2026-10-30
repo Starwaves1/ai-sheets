@@ -79,6 +79,7 @@ class BookPage {
       resize: (axis, idx, size) => this.submit([{ t: "size", s: this.sheet.id, axis, sizes: idx.map((i) => [i, size]) }]),
       unhide: (axis, idx) => this.submit([{ t: "hide", s: this.sheet.id, axis, idx, hidden: false }]),
       pick: (p) => this.pickReference(p),
+      move: (axis, lo, hi, gap) => this.moveBlock(axis, lo, hi, gap),
       hoverCell: (p) => {
         this.hoverPos = p;
         this.updateFlagCard();
@@ -894,6 +895,25 @@ class BookPage {
     items.push("-");
     if (kind !== "col") items.push({ label: `Delete ${plural(nr, "row")}`, run: del("row") });
     if (kind !== "row") items.push({ label: `Delete ${plural(nc, "column")}`, run: del("col") });
+    // Moving by one step, for touch screens (a mouse can drag the header instead).
+    const step = (axis: "row" | "col", dir: -1 | 1) => () => {
+      const r2 = g.rect;
+      const [lo, hi] = axis === "row" ? [r2.i1, r2.i2] : [r2.j1, r2.j2];
+      const n = axis === "row" ? g.rowCount : g.colCount;
+      if (dir < 0 ? lo > 0 : hi < n - 1) this.moveBlock(axis, lo, hi, dir < 0 ? lo - 1 : hi + 2);
+    };
+    if (kind === "row") {
+      items.push(
+        { label: nr === 1 ? "Move row up" : "Move rows up", disabled: g.rect.i1 === 0, run: step("row", -1) },
+        { label: nr === 1 ? "Move row down" : "Move rows down", disabled: g.rect.i2 >= g.rowCount - 1, run: step("row", 1) },
+      );
+    }
+    if (kind === "col") {
+      items.push(
+        { label: nc === 1 ? "Move column left" : "Move columns left", disabled: g.rect.j1 === 0, run: step("col", -1) },
+        { label: nc === 1 ? "Move column right" : "Move columns right", disabled: g.rect.j2 >= g.colCount - 1, run: step("col", 1) },
+      );
+    }
     if (kind === "col") {
       const hid = hiddenIn("col");
       items.push(
@@ -930,6 +950,27 @@ class BookPage {
       );
     }
     menu(items, x, y);
+  }
+
+  /**
+   * Move display rows/cols [lo, hi] to the gap before display index `gap` (one undoable change),
+   * then keep them selected. Needs a contiguous block of stored rows/cols and no sort on rows.
+   */
+  private moveBlock(axis: "row" | "col", lo: number, hi: number, gap: number): void {
+    const g = this.grid, s = this.sheet;
+    const list = axis === "row" ? g.rows : g.cols;
+    if (axis === "row" && s.view?.sort) return this.showToast("Rows can't be moved while the sheet is sorted; clear the sort first");
+    if (list[hi]! - list[lo]! !== hi - lo) return this.showToast("Only rows or columns next to each other can move together");
+    const from = list[lo]!, n = hi - lo + 1;
+    const count = axis === "row" ? s.rows : s.cols;
+    const to = gap < list.length ? list[gap]! : count;
+    if (to >= from && to <= from + n) return;
+    if (!this.submit([{ t: "move", s: s.id, axis, from, n, to }])) return;
+    const start = to <= from ? to : to - n;
+    const a = g.displayOf(axis === "row" ? { r: start, c: 0 } : { r: 0, c: start });
+    const b = g.displayOf(axis === "row" ? { r: start + n - 1, c: 0 } : { r: 0, c: start + n - 1 });
+    if (axis === "row") g.selectDisplay(a.i, 0, b.i, g.colCount - 1, false);
+    else g.selectDisplay(0, a.j, g.rowCount - 1, b.j, false);
   }
 
   // ---- sort & filter ---------------------------------------------------------------------------

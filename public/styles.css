@@ -567,3 +567,6 @@ body:has(.book) { overflow: hidden; }
   .me { padding: 0 6px; max-width: 30vw; overflow: hidden; text-overflow: ellipsis; }
   .flag-card { width: min(260px, calc(100% - 16px)); }
 }
+.resize-guide.move-guide { background: var(--accent); box-shadow: 0 0 0 1px var(--paper); }
+.resize-guide.move-guide.col { width: 3px; }
+.resize-guide.move-guide.row { height: 3px; }

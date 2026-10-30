@@ -35,7 +35,7 @@ export interface ChangeEvent {
 
 export type Status = "live" | "connecting" | "offline" | "deleted";
 
-const STRUCTURAL = new Set(["insert", "delete", "size", "hide", "freeze", "view", "grid", "addSheet", "deleteSheet", "renameSheet", "moveSheet", "cond"]);
+const STRUCTURAL = new Set(["insert", "delete", "move", "size", "hide", "freeze", "view", "grid", "addSheet", "deleteSheet", "renameSheet", "moveSheet", "cond"]);
 
 export class Session {
   wb!: Workbook;
@@ -216,7 +216,7 @@ export class Session {
     }
     // Rebase in order: each pending change moves past the remote ops, and the remote
     // ops move past it before meeting the next pending change.
-    const moves = c.ops.some((op) => op.t === "insert" || op.t === "delete" || op.t === "deleteSheet");
+    const moves = c.ops.some((op) => op.t === "insert" || op.t === "delete" || op.t === "move" || op.t === "deleteSheet");
     let remote = c.ops;
     for (const p of this.pending) {
       const before = p.ops;
