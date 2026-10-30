@@ -313,43 +313,66 @@ function footprint(op: Op): { cells: Map<string, Set<number>>; ranges: Array<{ k
 }
 
 /**
- * Split `inv` (ops in the frame just before `p`) into what can still be applied and what `p`
- * overwrote. Cell lists are split cell by cell; whole settings are kept or skipped as a unit.
+ * Rebase the inverse sequence `inv` past the later op `p0`; with `carveOut`, set aside what `p0`
+ * overwrote. Each op of `inv` is in the frame its predecessors leave (insert the row, then refill
+ * it), so `p0` is carried through the sequence and compared with each op in that op's own frame.
  */
-function carve(inv: Op[], p: Op): { keep: Op[]; skip: Op[] } {
-  const fp = footprint(p);
+function pastLater(inv: Op[], p0: Op, doc: Doc, carveOut: boolean): { keep: Op[]; skip: Op[] } {
   const keep: Op[] = [], skip: Op[] = [];
-  const hit = (k: string, r: number, c: number) => !!fp.cells.get(k)?.has(key(r, c)) || fp.ranges.some((x) => x.k === k && inRange(x.g, r, c));
+  let p: Op | null = p0;
   for (const op of inv) {
-    if (op.t === "set" || op.t === "fmt" || op.t === "flag") {
-      const k = `${op.t === "set" ? "v" : op.t === "fmt" ? "f" : "g"}:${op.s}`;
-      const yes = op.cells.filter(([r, c]) => hit(k, r, c)), no = op.cells.filter(([r, c]) => !hit(k, r, c));
-      if (no.length) keep.push({ ...op, cells: no } as Op);
-      if (yes.length) skip.push({ ...op, cells: yes } as Op);
-    } else if (op.t === "size" || op.t === "hide") {
-      const ids = op.t === "size" ? op.sizes.map(([i]) => i) : op.idx;
-      const bad = ids.filter((i) => fp.whole.has(`${op.t}:${op.s}:${op.axis}:${i}`));
-      if (!bad.length) keep.push(op);
-      else {
-        skip.push(op);
-        const rest = op.t === "size" ? { ...op, sizes: op.sizes.filter(([i]) => !bad.includes(i)) } : { ...op, idx: op.idx.filter((i) => !bad.includes(i)) };
-        if ((rest.t === "size" ? rest.sizes : rest.idx).length) keep.push(rest);
-      }
-    } else if (op.t === "delete") {
-      // Undoing an insert: keep the rows/cols if someone has since written into them.
-      const written = [...fp.cells.entries()].some(([k, set]) => k.endsWith(`:${op.s}`) && [...set].some((x) => {
-        const i = op.axis === "row" ? keyRow(x) : keyCol(x);
-        return i >= op.at && i < op.at + op.n;
-      }));
-      (written ? skip : keep).push(op);
-    } else if (op.t === "deleteSheet") {
-      ("s" in p && p.s === op.s ? skip : keep).push(op);
-    } else {
-      const fk = footprint(op).whole;
-      ([...fk].some((k) => fp.whole.has(k)) ? skip : keep).push(op);
+    if (!p) {
+      keep.push(op);
+      continue;
     }
+    const parts = carveOut ? carveOne(op, p) : { keep: [op], skip: [] };
+    for (const x of parts.keep) {
+      const t = transform(x, p, doc);
+      if (t) keep.push(t);
+    }
+    for (const x of parts.skip) {
+      const t = transform(x, p, doc);
+      if (t) skip.push(t);
+    }
+    p = transform(p, op, doc, false);
   }
   return { keep, skip };
+}
+
+/**
+ * Split one inverse op into what can still be applied and what `p` (in the same frame) overwrote.
+ * Cell lists split cell by cell; whole settings are kept or set aside as a unit.
+ */
+function carveOne(op: Op, p: Op): { keep: Op[]; skip: Op[] } {
+  const fp = footprint(p);
+  const hit = (k: string, r: number, c: number) => !!fp.cells.get(k)?.has(key(r, c)) || fp.ranges.some((x) => x.k === k && inRange(x.g, r, c));
+  const split = (yes: Op | null, no: Op | null) => ({ keep: no ? [no] : [], skip: yes ? [yes] : [] });
+  if (op.t === "set" || op.t === "fmt" || op.t === "flag") {
+    const k = `${op.t === "set" ? "v" : op.t === "fmt" ? "f" : "g"}:${op.s}`;
+    const yes = op.cells.filter(([r, c]) => hit(k, r, c)), no = op.cells.filter(([r, c]) => !hit(k, r, c));
+    return split(yes.length ? ({ ...op, cells: yes } as Op) : null, no.length ? ({ ...op, cells: no } as Op) : null);
+  }
+  if (op.t === "size") {
+    const bad = (i: number) => fp.whole.has(`size:${op.s}:${op.axis}:${i}`);
+    const yes = op.sizes.filter(([i]) => bad(i)), no = op.sizes.filter(([i]) => !bad(i));
+    return split(yes.length ? { ...op, sizes: yes } : null, no.length ? { ...op, sizes: no } : null);
+  }
+  if (op.t === "hide") {
+    const bad = (i: number) => fp.whole.has(`hide:${op.s}:${op.axis}:${i}`);
+    const yes = op.idx.filter(bad), no = op.idx.filter((i) => !bad(i));
+    return split(yes.length ? { ...op, idx: yes } : null, no.length ? { ...op, idx: no } : null);
+  }
+  if (op.t === "delete") {
+    // Undoing an insert: keep the rows/cols if someone has since written into them.
+    const written = [...fp.cells.entries()].some(([k, set]) => k.endsWith(`:${op.s}`) && [...set].some((x) => {
+      const i = op.axis === "row" ? keyRow(x) : keyCol(x);
+      return i >= op.at && i < op.at + op.n;
+    }));
+    return written ? split(op, null) : split(null, op);
+  }
+  if (op.t === "deleteSheet") return "s" in p && p.s === op.s ? split(op, null) : split(null, op);
+  const mine = footprint(op).whole;
+  return [...mine].some((k) => fp.whole.has(k)) ? split(op, null) : split(null, op);
 }
 
 const moveOver = (ops: Op[], prior: Op, doc?: Doc): Op[] => transformAll(ops, [prior], doc);
@@ -370,13 +393,10 @@ export function revertOps(log: Change[], targets: Set<number>, doc: Doc, force =
     for (const c of log) {
       if (c.v <= t.v) continue;
       for (const p of c.ops) {
-        if (!force && !targets.has(c.v)) {
-          const { keep, skip: lost } = carve(inv, p);
-          inv = keep;
-          for (const op of lost) skip.push({ op, by: c.actor });
-        }
-        inv = moveOver(inv, p, doc);
         skip = skip.flatMap((x) => moveOver([x.op], p, doc).map((op) => ({ op, by: x.by })));
+        const r = pastLater(inv, p, doc, !force && !targets.has(c.v));
+        inv = r.keep;
+        for (const op of r.skip) skip.push({ op, by: c.actor });
       }
     }
     for (const p of out) {

@@ -172,3 +172,15 @@ test("finding 1: insert and move converge in either order (property)", () => {
   }
   assert.equal(diverged, 0, `${diverged}/${total} insert/move pairs diverge`);
 });
+
+test("finding 2: reverting a delete after the row below it was edited and a row inserted above", () => {
+  const L = new Log();
+  L.set("g", { A1: "r0", A2: "r1", A3: "r2", A4: "r3" });
+  const del = L.edit("c", [{ t: "delete", s: "s1", axis: "row", at: 1, n: 1 }]);
+  L.edit("g", [{ t: "insert", s: "s1", axis: "row", at: 0, n: 1 }]);
+  L.set("g", { A3: "r2 edited" });
+  const plan = L.revert([del]);
+  assert.deepEqual(colA(L, 5), ["", "r0", "r1", "r2 edited", "r3"]);
+  assert.deepEqual(plan.skipped, []);
+});
+
