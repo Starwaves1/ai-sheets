@@ -496,3 +496,12 @@ body:has(.book) { overflow: hidden; }
   position: absolute; left: 0; top: 0; width: 1px; height: 1px; padding: 0; border: 0;
   opacity: 0; resize: none; overflow: hidden; pointer-events: none; font-size: 16px; caret-color: transparent;
 }
+
+/* Fill handle (mouse) and the dashed outline of the cells a fill drag will cover. */
+.fill-handle {
+  position: absolute; left: 0; top: 0; width: 8px; height: 8px; margin: -5px 0 0 -5px; z-index: 7;
+  background: var(--accent); border: 1.5px solid var(--paper); border-radius: 1px; cursor: crosshair; touch-action: none;
+}
+.fill-preview { position: absolute; border: 1.5px dashed var(--accent); margin: -1px 0 0 -1px; z-index: 5; pointer-events: none; }
+.is-editing .fill-handle { display: none; }
+@media (pointer: coarse) { .fill-handle { display: none; } }

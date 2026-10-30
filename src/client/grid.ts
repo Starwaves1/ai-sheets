@@ -33,6 +33,7 @@ export interface GridEvents {
   unhide(axis: "row" | "col", indices: number[]): void;
   /** A click on a cell while a formula is being typed: return true if it was taken as a reference. */
   pick(p: Pos): boolean;
+  fill(source: DisplayRect, target: DisplayRect, alt: boolean): void;
 }
 
 interface Pane {
@@ -73,6 +74,8 @@ export class Grid {
   private frozenLineH: HTMLElement;
   private guide: HTMLElement;
   private handle: HTMLElement; // touch: drag to extend the selection
+  private fillHandle: HTMLElement; // mouse: drag to autofill
+  private fillPreview: HTMLElement;
   // Keyboard focus sits in this hidden textarea with a one-space selection, not on the
   // scroller: Safari only fires copy/cut/paste on an editable element with a selection.
   private proxy: HTMLTextAreaElement;
@@ -117,15 +120,17 @@ export class Grid {
     this.frozenLineH = h("div", { class: "frozen-line h" });
     this.guide = h("div", { class: "resize-guide", hidden: true });
     this.handle = h("div", { class: "sel-handle", "aria-hidden": "true" });
+    this.fillHandle = h("div", { class: "fill-handle", title: "Drag to fill (Ctrl or Alt: copy instead of a series)" });
+    this.fillPreview = h("div", { class: "fill-preview", hidden: true });
     const layer = h("div", { class: "layer" },
       ...this.panes.map((p) => p.clip), ...this.colHeads.map((x) => x.clip), ...this.rowHeads.map((x) => x.clip),
-      corner, this.frozenLineV, this.frozenLineH, this.guide);
+      corner, this.frozenLineV, this.frozenLineH, this.guide, this.fillPreview);
     this.proxy = h("textarea", {
       class: "kbd-proxy", "aria-label": "Spreadsheet grid", inputmode: "none", tabindex: "-1",
       autocomplete: "off", autocorrect: "off", autocapitalize: "off", spellcheck: "false",
     });
     this.proxy.value = " ";
-    this.root = h("div", { class: "grid" }, this.scroller, layer, this.handle, this.proxy);
+    this.root = h("div", { class: "grid" }, this.scroller, layer, this.handle, this.fillHandle, this.proxy);
 
     this.scroller.addEventListener("scroll", () => this.render(), { passive: true });
     this.scroller.addEventListener("focus", () => {
@@ -138,6 +143,7 @@ export class Grid {
     // Frozen-pane limits depend on the viewport, so a resize re-lays out.
     new ResizeObserver(() => this.sheet && this.layout()).observe(this.scroller);
     this.bindTouch();
+    this.bindFill();
   }
 
   /**
@@ -794,7 +800,54 @@ export class Grid {
     const x = b.x + b.w, y = b.y + b.h;
     const ok = x > HEAD_W && y > HEAD_H && x < W && y < H;
     this.handle.hidden = !ok;
-    if (ok) this.handle.style.transform = `translate(${x}px, ${y}px)`;
+    this.fillHandle.hidden = !ok;
+    if (ok) this.handle.style.transform = this.fillHandle.style.transform = `translate(${x}px, ${y}px)`;
+  }
+
+  // ---- fill handle ---------------------------------------------------------------------
+  // Drag the square on the selection's corner: the selection extends down, up, right or left
+  // (whichever way the pointer went furthest) and the new cells continue its pattern.
+
+  private bindFill(): void {
+    const fh = this.fillHandle;
+    fh.addEventListener("pointerdown", (e) => {
+      if (e.button !== 0) return;
+      e.preventDefault();
+      e.stopPropagation();
+      fh.setPointerCapture(e.pointerId);
+      const src = this.rect;
+      let target: DisplayRect | null = null;
+      this.dragging = { kind: "cells" };
+      const move = (ev: PointerEvent) => {
+        const m = this.hit(ev);
+        const W = this.scroller.clientWidth, H = this.scroller.clientHeight;
+        if (m.x > W - 16) this.scroller.scrollLeft += 24;
+        if (m.y > H - 16) this.scroller.scrollTop += 24;
+        if (m.x < HEAD_W + 8) this.scroller.scrollLeft -= 24;
+        if (m.y < HEAD_H + 8) this.scroller.scrollTop -= 24;
+        target = fillTarget(src, m.i, m.j);
+        this.showFillPreview(target ? union(src, target) : null);
+      };
+      const up = (ev: PointerEvent) => {
+        fh.removeEventListener("pointermove", move);
+        fh.removeEventListener("pointerup", up);
+        fh.removeEventListener("pointercancel", up);
+        this.dragging = null;
+        this.showFillPreview(null);
+        if (target && ev.type === "pointerup") this.ev.fill(src, target, ev.ctrlKey || ev.altKey || ev.metaKey);
+      };
+      fh.addEventListener("pointermove", move);
+      fh.addEventListener("pointerup", up);
+      fh.addEventListener("pointercancel", up);
+    });
+  }
+
+  private showFillPreview(r: DisplayRect | null): void {
+    const p = this.fillPreview;
+    p.hidden = !r;
+    if (!r) return;
+    const a = this.cellBox(r.i1, r.j1), b = this.cellBox(r.i2, r.j2);
+    p.style.cssText = `left:${a.x}px;top:${a.y}px;width:${b.x + b.w - a.x}px;height:${b.y + b.h - a.y}px`;
   }
 
   /** Width that fits the longest text in a column. */
@@ -823,6 +876,21 @@ function fitPrefix(offsets: Float64Array, n: number, max: number): void {
   for (let i = 1; i <= n; i++) offsets[i] = offsets[i]! * k;
   const shift = total - max;
   for (let i = n + 1; i < offsets.length; i++) offsets[i] = offsets[i]! - shift;
+}
+
+/** Cells a fill drag from `src` to display cell (i, j) adds, or null if the pointer is inside `src`. */
+export function fillTarget(src: DisplayRect, i: number, j: number): DisplayRect | null {
+  const di = i > src.i2 ? i - src.i2 : i < src.i1 ? i - src.i1 : 0;
+  const dj = j > src.j2 ? j - src.j2 : j < src.j1 ? j - src.j1 : 0;
+  if (!di && !dj) return null;
+  if (Math.abs(di) >= Math.abs(dj)) {
+    return di > 0 ? { ...src, i1: src.i2 + 1, i2: i } : { ...src, i1: i, i2: src.i1 - 1 };
+  }
+  return dj > 0 ? { ...src, j1: src.j2 + 1, j2: j } : { ...src, j1: j, j2: src.j1 - 1 };
+}
+
+export function union(a: DisplayRect, b: DisplayRect): DisplayRect {
+  return { i1: Math.min(a.i1, b.i1), j1: Math.min(a.j1, b.j1), i2: Math.max(a.i2, b.i2), j2: Math.max(a.j2, b.j2) };
 }
 
 function range(a: number, b: number): number[] {

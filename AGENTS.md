@@ -30,7 +30,10 @@ sheets set budget C2:C9 '=B2*1.2'          # one value fills a range; relative r
 sheets set budget A10 --csv rows.csv       # a block, anchored at A10 (--tsv and - for stdin work too)
 sheets set budget A1 --json '[["a",1],["b",2]]'
 sheets clear budget D2:D9                  # values only; add --formats to drop formatting too
+sheets fill runs A2:A4 A5:A40              # continue a pattern, like dragging the fill handle
 ```
+
+`fill` continues what the source shows: 1,2,3 → 4,5,6; 10,7 → 4,1; `Item 1` → `Item 2`; `run-01` → `run-02`; Mon → Tue; Jan → Feb; anything else repeats. Formulas shift their relative references, formats come along, and conditional rules covering the source grow to cover the target. The target can include the source (A2:A40) or sit beside it in any direction; filling up or left runs the series backwards. `--copy` repeats instead of counting (and counts up from a single number, which otherwise copies).
 
 - Write only the cells you mean to change. Edits are per cell, so you and Garrett can work on the same sheet at once; rewriting a whole range you only read can overwrite his newer edits.
 - Text that starts with `=` but is not a formula: prefix an apostrophe (`'=not a formula`).

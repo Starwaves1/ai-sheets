@@ -112,6 +112,27 @@ try {
     check(menuOpen, `${name}: long press opens the row/column menu`);
     if (shots && name === "iphone-15") await page.screenshot({ path: join(shots, `mobile-menu-${name}.png`) });
     await page.keyboard.press("Escape");
+
+    // Autofill on touch: select C2:C6 with 1, 2 at the top, long-press inside, choose "Autofill down".
+    if (name === "iphone-15" || name === "ipad") {
+      await page.waitForTimeout(1000); // the menu ignores a contextmenu within 1 s of a long press
+      await cli("set", scratch.id, "C2", "1");
+      await cli("set", scratch.id, "C3", "2");
+      await page.waitForTimeout(300);
+      await page.touchscreen.tap(...(Object.values((await page.locator(".addr").boundingBox())!).slice(0, 2).map((v) => v + 5) as [number, number]));
+      await page.keyboard.press("Control+a");
+      await page.keyboard.type("C2:C6");
+      await page.keyboard.press("Enter");
+      const two = await cellAt(page, "2");
+      await cdpLongPress(page, two!.x, two!.y);
+      const item = page.locator(".menu .item", { hasText: "Autofill down" });
+      const offered = await item.count();
+      if (offered) await item.tap();
+      await page.waitForTimeout(400);
+      const filled = await cli("get", scratch.id, "C2:C6", "--csv");
+      check(offered === 1 && filled === "1\n2\n3\n4\n5\n", `${name}: long-press "Autofill down" fills the selection's empty cells`, JSON.stringify(filled));
+      await cli("clear", scratch.id, "C2:C6");
+    }
     await ctx.close();
   }
 } finally {

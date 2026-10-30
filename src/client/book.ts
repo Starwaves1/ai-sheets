@@ -9,7 +9,8 @@ import { key, newSheet, sheetToJSON, type CondRule, type Format, type Sheet, typ
 import type { FormatPatch, Op } from "../core/ops.ts";
 import { columnValues } from "../core/view.ts";
 import { clearChildren, h, icon, ICONS } from "./dom.ts";
-import { Grid, type Pos } from "./grid.ts";
+import { autofillOps } from "../core/fill.ts";
+import { Grid, union, type DisplayRect, type Pos } from "./grid.ts";
 import { colorPicker, CondPanel, filterPopover, menu, menuBelow, type MenuItem } from "./popups.ts";
 import { Session, type ChangeEvent } from "./session.ts";
 
@@ -69,6 +70,7 @@ class BookPage {
       resize: (axis, idx, size) => this.submit([{ t: "size", s: this.sheet.id, axis, sizes: idx.map((i) => [i, size]) }]),
       unhide: (axis, idx) => this.submit([{ t: "hide", s: this.sheet.id, axis, idx, hidden: false }]),
       pick: (p) => this.pickReference(p),
+      fill: (source, target, alt) => this.autofill(source, target, alt),
     });
 
     this.title = h("input", { class: "title", value: wb.doc.name, "aria-label": "Workbook name", spellcheck: "false" });
@@ -781,6 +783,44 @@ class BookPage {
     if (vals.length) this.submit([{ t: "set", s: s.id, cells: vals }, { t: "fmt", s: s.id, cells: fmts }]);
   }
 
+  /** Fill `target` (display positions) from the pattern in `source`; one undoable change. */
+  private autofill(source: DisplayRect, target: DisplayRect, alt: boolean): void {
+    const g = this.grid;
+    const box = (r: DisplayRect) => ({ r1: r.i1, c1: r.j1, r2: r.i2, c2: r.j2 });
+    let ops: Op[];
+    try {
+      ops = autofillOps(this.sheet, box(source), box(target), alt, (i) => g.rows[i]!, (j) => g.cols[j]!);
+    } catch (e) {
+      return this.showToast((e as Error).message);
+    }
+    if (this.submit(ops)) {
+      const u = union(source, target);
+      g.selectDisplay(u.i1, u.j1, u.i2, u.j2, false);
+    }
+  }
+
+  /**
+   * The menu's Autofill: the selection's filled leading rows (or columns) are the pattern,
+   * the empty ones after them get filled. Null when the selection has no such split.
+   */
+  private autofillSplit(): { source: DisplayRect; target: DisplayRect; label: string } | null {
+    const g = this.grid, r = g.rect, s = this.sheet;
+    const filled = (i: number, j: number) => s.cells.get(key(g.rows[i]!, g.cols[j]!))?.v !== undefined;
+    const lastRow = () => {
+      for (let i = r.i2; i >= r.i1; i--) for (let j = r.j1; j <= r.j2; j++) if (filled(i, j)) return i;
+      return -1;
+    };
+    const lastCol = () => {
+      for (let j = r.j2; j >= r.j1; j--) for (let i = r.i1; i <= r.i2; i++) if (filled(i, j)) return j;
+      return -1;
+    };
+    const i = lastRow();
+    if (r.i2 > r.i1 && i >= r.i1 && i < r.i2) return { source: { ...r, i2: i }, target: { ...r, i1: i + 1 }, label: "Autofill down" };
+    const j = lastCol();
+    if (r.j2 > r.j1 && j >= r.j1 && j < r.j2) return { source: { ...r, j2: j }, target: { ...r, j1: j + 1 }, label: "Autofill right" };
+    return null;
+  }
+
   // ---- rows / columns ----------------------------------------------------------------------------
 
   private contextMenu(x: number, y: number, kind: "cell" | "col" | "row"): void {
@@ -856,7 +896,9 @@ class BookPage {
       );
     }
     if (kind === "cell") {
+      const split = this.autofillSplit();
       items.push("-",
+        ...(split ? [{ label: split.label, run: () => this.autofill(split.source, split.target, false) }] : []),
         { label: "Clear contents", hint: "Delete", run: () => this.clearSelection() },
         { label: "Clear formatting", run: () => this.clearSelection(true) },
       );

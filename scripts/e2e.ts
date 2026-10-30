@@ -184,6 +184,34 @@ try {
   check(fb === "clicked|after|/=1+B3*2||clicked" && afterClick[0] === "D9" && afterClick[1] === true,
     "formula bar: clicking a cell commits and selects it; mid-formula it inserts the reference; then typing and copy/paste work", `${fb}, after click ${JSON.stringify(afterClick)}`);
   await cli("clear", book.id, "C5:E10");
+  // Fill handle: a real mouse drag continues the series; Ctrl while dragging counts up from a single number.
+  await api("PUT", `/api/books/${book.id}/range?ref=B12`, { values: [[1, "Item 1", "", 5], [2, "Item 2"], [3, "Item 3"]] });
+  const drag = async (to: { x: number; y: number }, mod?: string) => {
+    await page.waitForTimeout(100); // the handle moves on the next paint
+    const hb = (await page.locator(".fill-handle").boundingBox())!;
+    await page.mouse.move(hb.x + hb.width / 2, hb.y + hb.height / 2);
+    await page.mouse.down();
+    for (let k = 1; k <= 6; k++) await page.mouse.move(hb.x + (to.x - hb.x) * k / 6, hb.y + (to.y - hb.y) * k / 6);
+    const preview = await page.evaluate(() => !(document.querySelector(".fill-preview") as HTMLElement).hidden);
+    if (mod) await page.keyboard.down(mod);
+    await page.mouse.up();
+    if (mod) await page.keyboard.up(mod);
+    await page.waitForTimeout(400);
+    return preview;
+  };
+  await goto("A1");
+  await goto("B12:C14");
+  const previewed = await drag(await cellCenter("B", "18"));
+  const series = await cli("get", book.id, "B15:C18", "--csv");
+  check(previewed && series === "4,Item 4\n5,Item 5\n6,Item 6\n7,Item 7\n", "dragging the fill handle continues the series (dashed preview while dragging)", JSON.stringify(series));
+  await goto("E12");
+  await drag(await cellCenter("H", "12"), "Control");
+  const counted = await cli("get", book.id, "F12:H12", "--csv");
+  check(counted === "6,7,8\n", "Ctrl while dragging counts up from a single number", JSON.stringify(counted));
+  await page.keyboard.press(`${MODK}+Z`);
+  await page.waitForTimeout(300);
+  check((await cli("get", book.id, "F12:H12", "--csv")) === ",,\n", "a fill is one undoable change");
+  await cli("clear", book.id, "B12:H18");
 
   // 3. idle cost
   await page.waitForTimeout(2200); // let the highlight fade finish

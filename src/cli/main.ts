@@ -4,7 +4,8 @@ import { readFileSync, writeFileSync } from "node:fs";
 import { colName, parseRange, rangeName, MAX_COLS, MAX_ROWS, type SheetRange } from "../core/a1.ts";
 import { parseDelimited } from "../core/csv.ts";
 import { describeOp } from "../core/describe.ts";
-import { COND_OPS, type CondOp, type CondRule, type ViewState } from "../core/model.ts";
+import { autofillOps } from "../core/fill.ts";
+import { COND_OPS, sheetFromJSON, type CondOp, type CondRule, type SheetJSON, type ViewState } from "../core/model.ts";
 import type { FormatPatch, Op } from "../core/ops.ts";
 
 const SERVER = (process.env.SHEETS_URL ?? "http://127.0.0.1:8790").replace(/\/$/, "");
@@ -37,7 +38,7 @@ interface Args {
   flags: Map<string, string | true>;
 }
 
-const BOOL_FLAGS = new Set(["csv", "tsv", "json", "formulas", "desc", "bold", "no-bold", "italic", "no-italic", "strike", "no-strike", "wrap", "no-wrap", "rotate", "no-rotate", "reset", "formats", "clear", "off", "yes", "help", "values"]);
+const BOOL_FLAGS = new Set(["csv", "tsv", "json", "formulas", "desc", "bold", "no-bold", "italic", "no-italic", "strike", "no-strike", "wrap", "no-wrap", "rotate", "no-rotate", "reset", "formats", "copy", "clear", "off", "yes", "help", "values"]);
 
 function parseArgs(argv: string[]): Args {
   const pos: string[] = [];
@@ -149,6 +150,10 @@ const HELP = `sheets: read and edit workbooks on the sheets server (${SERVER})
   sheets set <book> <range> <value...>        one value; fills the range if it is larger
   sheets set <book> <anchor> --csv <file|-> | --tsv <file|-> | --json '[[1,2],[3,4]]'
   sheets clear <book> <range> [--formats]
+  sheets fill <book> <source> <target> [--copy]   continue the pattern in source into target, like
+                                              dragging the fill handle: 1,2,3 → 4,5,6; Item 1 → Item 2;
+                                              Mon → Tue; formulas shift; formats follow. --copy repeats
+                                              instead (and counts up from a single number)
   sheets format <book> <range> [--bold] [--italic] [--strike] [--color C] [--fill C]
                 [--align left|center|right] [--nf 0.00|0%|#,##0|$#,##0.00] [--wrap] [--rotate] [--reset]
   sheets cond <book> [--sheet S]              list conditional fill rules
@@ -290,6 +295,30 @@ async function main(argv: string[]): Promise<void> {
       return;
     }
     case "cond": return cond(a, rest);
+    case "fill": {
+      need(3, "fill <book> <source range> <target range> [--copy]");
+      const b = await api<BookInfo & { doc: { sheets: SheetJSON[] } }>("GET", `/api/books/${enc(rest[0]!)}/doc`);
+      const src = rangeArg(b, rest[1]!);
+      const dst = rangeArg(b, rest[2]!, src.sheet.name);
+      if (dst.sheet.id !== src.sheet.id) throw new CliError("source and target must be on the same sheet");
+      // A target that contains the source means "fill the rest of it".
+      let t = { r1: dst.range.r1, c1: dst.range.c1, r2: dst.range.r2, c2: dst.range.c2 };
+      const g = src.range;
+      if (t.c1 === g.c1 && t.c2 === g.c2 && t.r1 === g.r1 && t.r2 > g.r2) t = { ...t, r1: g.r2 + 1 };
+      else if (t.c1 === g.c1 && t.c2 === g.c2 && t.r2 === g.r2 && t.r1 < g.r1) t = { ...t, r2: g.r1 - 1 };
+      else if (t.r1 === g.r1 && t.r2 === g.r2 && t.c1 === g.c1 && t.c2 > g.c2) t = { ...t, c1: g.c2 + 1 };
+      else if (t.r1 === g.r1 && t.r2 === g.r2 && t.c2 === g.c2 && t.c1 < g.c1) t = { ...t, c2: g.c1 - 1 };
+      const sheet = sheetFromJSON(b.doc.sheets.find((x) => x.id === src.sheet.id)!);
+      let list: Op[];
+      try {
+        list = autofillOps(sheet, g, t, a.flags.has("copy"));
+      } catch (e) {
+        throw new CliError(`${(e as Error).message} (e.g. fill <book> A2:A4 A5:A20)`);
+      }
+      const r = await api<{ v: number }>("POST", `/api/books/${enc(b.id)}/ops`, { ops: list, base: b.version });
+      console.log(`filled ${src.sheet.name}!${rangeName(t)} from ${rangeName(g)} (v${r.v})`);
+      return;
+    }
     case "freeze": {
       need(3, "freeze <book> <rows> <cols>");
       const b = await info(rest[0]!);
