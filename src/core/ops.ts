@@ -153,12 +153,9 @@ export function apply(doc: Doc, op: Op): Applied {
         if (sizesMap.has(i)) sizes.push([i, sizesMap.get(i)!]);
         if (hiddenSet.has(i)) hidden.push(i);
       }
-      const restore: Op[] = [
-        { t: "cond", s: sh.id, rules: structuredClone(sh.cond) },
-        { t: "view", s: sh.id, view: sh.view ? structuredClone(sh.view) : null },
-        { t: "freeze", s: sh.id, rows: sh.frozenRows, cols: sh.frozenCols },
-      ];
+      const before = settings(sh);
       const changed = shift(doc, sh, op.axis, op.at, -op.n);
+      const restore = restoreSettings(sh, before);
       const inverse: Op[] = [{ t: "insert", s: op.s, axis: op.axis, at: op.at, n: op.n }];
       if (vals.length) inverse.push({ t: "set", s: sh.id, cells: vals });
       if (fmts.length) inverse.push({ t: "fmt", s: sh.id, cells: fmts });
@@ -172,11 +169,9 @@ export function apply(doc: Doc, op: Op): Applied {
     case "move": {
       const sh = getSheet(doc, op.s);
       checkMove(sh, op.axis, op.from, op.n, op.to);
-      const restore: Op[] = [
-        { t: "cond", s: sh.id, rules: structuredClone(sh.cond) },
-        { t: "view", s: sh.id, view: sh.view ? structuredClone(sh.view) : null },
-      ];
+      const before = settings(sh);
       const changed = permute(doc, sh, op.axis, op.from, op.n, op.to);
+      const restore = restoreSettings(sh, before);
       const start = movedStart(op.from, op.n, op.to);
       const inverse: Op[] = [{ t: "move", s: op.s, axis: op.axis, from: start, n: op.n, to: start > op.from ? op.from : op.from + op.n }];
       for (const [sid, cells] of changed) inverse.push({ t: "set", s: sid, cells });
@@ -338,6 +333,23 @@ function checkSpan(sh: Sheet, axis: Axis, at: number, n: number, insert: boolean
   if (insert ? at > count || count + n > max : at + n > count || n >= count) {
     throw new OpError(`cannot ${insert ? "insert" : "delete"} ${n} ${axis}s at ${at}`);
   }
+}
+
+/** A sheet's conditional rules, view and frozen panes, to restore after a structural edit. */
+function settings(sh: Sheet): { cond: CondRule[]; view: ViewState | null; rows: number; cols: number } {
+  return { cond: structuredClone(sh.cond), view: sh.view ? structuredClone(sh.view) : null, rows: sh.frozenRows, cols: sh.frozenCols };
+}
+
+/**
+ * Inverse ops for only the settings a structural edit actually changed, so undoing it never
+ * resets someone's later sort, filter, rules or frozen panes it had nothing to do with.
+ */
+function restoreSettings(sh: Sheet, b: ReturnType<typeof settings>): Op[] {
+  const out: Op[] = [];
+  if (JSON.stringify(sh.cond) !== JSON.stringify(b.cond)) out.push({ t: "cond", s: sh.id, rules: b.cond });
+  if (JSON.stringify(sh.view) !== JSON.stringify(b.view)) out.push({ t: "view", s: sh.id, view: b.view });
+  if (sh.frozenRows !== b.rows || sh.frozenCols !== b.cols) out.push({ t: "freeze", s: sh.id, rows: b.rows, cols: b.cols });
+  return out;
 }
 
 function checkMove(sh: Sheet, axis: Axis, from: number, n: number, to: number): void {

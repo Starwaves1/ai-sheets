@@ -184,3 +184,15 @@ test("finding 2: reverting a delete after the row below it was edited and a row 
   assert.deepEqual(plan.skipped, []);
 });
 
+test("finding 3: reverting a delete does not fight a later sort, filter, fill rule or freeze", () => {
+  const L = new Log();
+  L.set("g", { A1: "h", A2: "b", A3: "a", A4: "c" });
+  const del = L.edit("c", [{ t: "delete", s: "s1", axis: "row", at: 3, n: 1 }]);
+  L.edit("g", [{ t: "view", s: "s1", view: { headerRow: 0, sort: { col: 0 }, filters: {} } }]);
+  L.edit("g", [{ t: "freeze", s: "s1", rows: 1, cols: 0 }]);
+  const plan = L.revert([del]);
+  assert.deepEqual(plan.skipped, []);
+  assert.equal(L.wb.doc.sheets[0]!.view?.sort?.col, 0);
+  assert.equal(L.wb.doc.sheets[0]!.frozenRows, 1);
+  assert.deepEqual(colA(L, 4), ["h", "b", "a", "c"]);
+});
