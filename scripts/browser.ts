@@ -1,9 +1,13 @@
-// Shared by the e2e test and the screenshot tool: launch headless Chromium via playwright-core.
-// Uses $CHROME_PATH, else the newest Playwright headless shell in ~/.cache/ms-playwright.
+// Shared by the e2e test and the screenshot tool: launch a headless browser via playwright-core.
+// SHEETS_BROWSER=chromium (default) | firefox | webkit. Chromium uses $CHROME_PATH, else the newest
+// Playwright headless shell in ~/.cache/ms-playwright; Firefox and WebKit use Playwright's own builds
+// (`npx playwright-core install firefox webkit`).
 import { existsSync, readdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { chromium, type Browser } from "playwright-core";
+import { chromium, firefox, webkit, type Browser } from "playwright-core";
+
+export const BROWSER = (process.env.SHEETS_BROWSER ?? "chromium") as "chromium" | "firefox" | "webkit";
 
 export function chromePath(): string {
   if (process.env.CHROME_PATH) return process.env.CHROME_PATH;
@@ -17,5 +21,7 @@ export function chromePath(): string {
 }
 
 export function launch(): Promise<Browser> {
+  if (BROWSER === "firefox") return firefox.launch();
+  if (BROWSER === "webkit") return webkit.launch();
   return chromium.launch({ executablePath: chromePath(), args: ["--no-sandbox"] });
 }

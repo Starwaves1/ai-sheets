@@ -8,7 +8,7 @@
 import { execFile } from "node:child_process";
 import { join } from "node:path";
 import { promisify } from "node:util";
-import { launch } from "./browser.ts";
+import { BROWSER, launch } from "./browser.ts";
 
 const BASE = (process.env.SHEETS_URL ?? "http://192.168.1.5:8790").replace(/\/$/, "");
 const shots = process.argv.includes("--shots") ? process.argv[process.argv.indexOf("--shots") + 1] : undefined;
@@ -88,24 +88,59 @@ try {
   const afterUndo = await cli("get", book.id, "C3", "--csv");
   check(afterUndo.trim() === "", "undo in the browser reaches the server", JSON.stringify(afterUndo));
 
-  // Pasting past the last column grows the sheet instead of dropping cells.
-  await page.click(".addr");
-  await page.keyboard.type("Y1");
-  await page.keyboard.press("Enter");
-  await page.evaluate(() => {
-    const dt = new DataTransfer();
-    dt.setData("text/plain", "p\tq\tr\ts");
-    document.querySelector(".scroller")!.dispatchEvent(new ClipboardEvent("paste", { clipboardData: dt, bubbles: true }));
-  });
+  // Real keyboard copy and paste (Safari and Firefox only fire clipboard events on an editable target).
+  const MODK = process.platform === "darwin" ? "Meta" : "Control";
+  const goto = async (ref: string) => {
+    await page.click(".addr");
+    await page.keyboard.type(ref);
+    await page.keyboard.press("Enter");
+  };
+  await goto("A2:B3");
+  await page.keyboard.press(`${MODK}+C`);
+  await goto("H2");
+  await page.keyboard.press(`${MODK}+V`);
+  await page.waitForTimeout(400);
+  const kbPaste = await cli("get", book.id, "H2:I3", "--csv");
+  check(kbPaste === "tea,3\ncake,4\n", "keyboard copy and paste a block", JSON.stringify(kbPaste));
+  // From a frozen pane: freeze the first row and column, copy A1 (frozen corner), paste it with a click-selected target.
+  const sid0 = (await api("GET", `/api/books/${book.id}`)).sheets[0].id;
+  await api("POST", `/api/books/${book.id}/ops`, { ops: [{ t: "freeze", s: sid0, rows: 1, cols: 1 }] });
   await page.waitForTimeout(300);
+  const a1 = await page.evaluate(() => {
+    const el = [...document.querySelectorAll(".c")].find((e) => e.textContent === "item")!.getBoundingClientRect();
+    return { x: el.x + el.width / 2, y: el.y + el.height / 2 };
+  });
+  await page.mouse.click(a1.x, a1.y);
+  await page.keyboard.press(`${MODK}+C`);
+  await goto("J5");
+  await page.keyboard.press(`${MODK}+V`);
+  await page.waitForTimeout(400);
+  const frozenPaste = (await cli("get", book.id, "J5", "--csv")).trim();
+  check(frozenPaste === "item", "copy from a frozen-pane cell (mouse-selected) pastes", JSON.stringify(frozenPaste));
+  await api("POST", `/api/books/${book.id}/ops`, { ops: [{ t: "freeze", s: sid0, rows: 0, cols: 0 }] });
+  // Pasting past the last column grows the sheet instead of dropping cells.
+  await api("PUT", `/api/books/${book.id}/range?ref=A20`, { values: [["p", "q", "r", "s"]] });
+  await goto("A20:D20");
+  await page.keyboard.press(`${MODK}+C`);
+  await goto("Y1");
+  await page.keyboard.press(`${MODK}+V`);
+  await page.waitForTimeout(400);
   const pasted = await cli("get", book.id, "Y1:AB1", "--csv");
   check(pasted === "p,q,r,s\n", "paste past the last column grows the sheet", JSON.stringify(pasted));
+  await cli("clear", book.id, "A20:D20");
+  // Typing still starts an edit after the focus moved to the clipboard proxy.
+  await goto("K2");
+  await page.keyboard.type("typed after copy");
+  await page.keyboard.press("Enter");
+  await page.waitForTimeout(300);
+  check((await cli("get", book.id, "K2", "--csv")).trim() === "typed after copy", "typing over a selected cell still edits it");
 
   // 3. idle cost
   await page.waitForTimeout(2200); // let the highlight fade finish
-  const cdp = await ctx.newCDPSession(page);
-  await cdp.send("Performance.enable");
-  const metric = async () => Object.fromEntries(((await cdp.send("Performance.getMetrics")).metrics as Array<{ name: string; value: number }>).map((m) => [m.name, m.value]));
+  // Layout and style-recalc counters come from Chromium's DevTools protocol; other browsers check timers and animations only.
+  const cdp = BROWSER === "chromium" ? await ctx.newCDPSession(page) : null;
+  await cdp?.send("Performance.enable");
+  const metric = async (): Promise<Record<string, number>> => (cdp ? Object.fromEntries(((await cdp.send("Performance.getMetrics")).metrics as Array<{ name: string; value: number }>).map((m) => [m.name, m.value])) : {});
   await page.evaluate(() => Object.assign((window as any).__counts, { raf: 0, timeout: 0, interval: 0 }));
   const m0 = await metric();
   await page.waitForTimeout(5000);
@@ -118,7 +153,9 @@ try {
     `rAF ${counts.raf}, timeouts ${counts.timeout}, intervals ${counts.interval}, running animations ${anims}, layouts ${d("LayoutCount")}, style recalcs ${d("RecalcStyleCount")}, script ${d("ScriptDuration")} s, tasks ${d("TaskDuration")} s`);
 
   // 4. two browser tabs writing at once, one of them inserting a row
-  const other = await ctx.newPage();
+  // Its own context (window), as a second person would have: pages sharing one window share focus in Firefox.
+  const ctx2 = await browser.newContext({ viewport: { width: 1280, height: 800 } });
+  const other = await ctx2.newPage();
   await other.goto(`${BASE}/b/${book.id}`, { waitUntil: "networkidle" });
   await other.waitForSelector(".live.live");
   const typeAt = async (p: typeof page, ref: string, text: string) => {
@@ -148,7 +185,7 @@ try {
   check(shifted === "\na0\n" && ya === yb && ya > 0, "a row inserted by an agent moves data in both tabs", `server ${JSON.stringify(shifted)}, a0 at y=${ya} and y=${yb}`);
   const inSync = await Promise.all([page, other].map((p) => p.evaluate(() => [...document.querySelectorAll(".c")].map((e) => e.textContent).filter((t) => /^(a|b)\d$/.test(t!)).sort().join(","))));
   check(inSync[0] === inSync[1] && inSync[0]!.split(",").length === 16, "both tabs show the same cells as the server", `${inSync[0]!.split(",").length} cells each`);
-  await other.close();
+  await ctx2.close();
 
   // 5. 50k cells
   const rows: string[] = [];
@@ -181,5 +218,5 @@ try {
   for (const id of created) await api("DELETE", `/api/books/${id}`);
   await browser.close();
 }
-console.log(failed ? `${failed} check(s) failed` : "all checks passed");
+console.log(`${BROWSER}: ${failed ? `${failed} check(s) failed` : "all checks passed"}`);
 process.exit(failed ? 1 : 0);

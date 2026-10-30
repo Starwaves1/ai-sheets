@@ -71,6 +71,9 @@ export class Grid {
   private frozenLineH: HTMLElement;
   private guide: HTMLElement;
   private handle: HTMLElement; // touch: drag to extend the selection
+  // Keyboard focus sits in this hidden textarea with a one-space selection, not on the
+  // scroller: Safari only fires copy/cut/paste on an editable element with a selection.
+  private proxy: HTMLTextAreaElement;
 
   sheet!: Sheet;
   rows: number[] = [];
@@ -115,9 +118,17 @@ export class Grid {
     const layer = h("div", { class: "layer" },
       ...this.panes.map((p) => p.clip), ...this.colHeads.map((x) => x.clip), ...this.rowHeads.map((x) => x.clip),
       corner, this.frozenLineV, this.frozenLineH, this.guide);
-    this.root = h("div", { class: "grid" }, this.scroller, layer, this.handle);
+    this.proxy = h("textarea", {
+      class: "kbd-proxy", "aria-label": "Spreadsheet grid", inputmode: "none", tabindex: "-1",
+      autocomplete: "off", autocorrect: "off", autocapitalize: "off", spellcheck: "false",
+    });
+    this.proxy.value = " ";
+    this.root = h("div", { class: "grid" }, this.scroller, layer, this.handle, this.proxy);
 
     this.scroller.addEventListener("scroll", () => this.render(), { passive: true });
+    this.scroller.addEventListener("focus", () => {
+      if (!matchMedia("(pointer: coarse)").matches) this.focusProxy();
+    });
     this.scroller.addEventListener("mousedown", (e) => this.mouseDown(e));
     this.scroller.addEventListener("dblclick", (e) => this.dblClick(e));
     this.scroller.addEventListener("contextmenu", (e) => this.contextMenu(e));
@@ -127,12 +138,25 @@ export class Grid {
     this.bindTouch();
   }
 
+  /**
+   * Give the grid keyboard focus. With a mouse that is the clipboard proxy; on touch screens
+   * it is the scroller, so a tap never brings up the on-screen keyboard.
+   */
   focusGrid(): void {
-    this.scroller.focus({ preventScroll: true });
+    if (matchMedia("(pointer: coarse)").matches) this.scroller.focus({ preventScroll: true });
+    else this.focusProxy();
   }
 
-  get focusTarget(): HTMLElement {
-    return this.scroller;
+  /** Focus the proxy and select its text, so the next copy/cut/paste fires in every browser. */
+  focusProxy(): void {
+    this.proxy.focus({ preventScroll: true });
+    this.proxy.value = " ";
+    this.proxy.select();
+  }
+
+  /** Elements that receive grid keystrokes and clipboard events. */
+  get focusTargets(): HTMLElement[] {
+    return [this.proxy, this.scroller];
   }
 
   // ---- layout ---------------------------------------------------------------

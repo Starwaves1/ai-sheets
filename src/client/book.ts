@@ -93,7 +93,16 @@ class BookPage {
         e.preventDefault();
       } else if (e.key === "Escape") this.grid.focusGrid();
     });
-    this.addr.addEventListener("focus", () => this.addr.select());
+    // Select the address on focus; Safari would clear that selection on the mouseup that focused it.
+    let justFocused = false;
+    this.addr.addEventListener("focus", () => {
+      this.addr.select();
+      justFocused = true;
+    });
+    this.addr.addEventListener("mouseup", (e) => {
+      if (justFocused) e.preventDefault();
+      justFocused = false;
+    });
     this.formula = h("input", { class: "formula", "aria-label": "Cell contents", spellcheck: "false" });
     this.formula.addEventListener("focus", () => {
       if (!this.editing) this.startEdit(null, false, true);
@@ -564,9 +573,12 @@ class BookPage {
   }
 
   private bindKeys(): void {
-    const target = this.grid.focusTarget;
+    for (const target of this.grid.focusTargets) this.bindKeysOn(target);
+  }
+
+  private bindKeysOn(target: HTMLElement): void {
     target.addEventListener("keydown", (e) => {
-      if (this.editing) return;
+      if (this.editing || e.isComposing) return;
       const mod = e.ctrlKey || e.metaKey;
       const k = e.key;
       const arrows: Record<string, [number, number]> = { ArrowUp: [-1, 0], ArrowDown: [1, 0], ArrowLeft: [0, -1], ArrowRight: [0, 1] };
@@ -679,6 +691,7 @@ class BookPage {
     if (this.editing) return;
     e.preventDefault();
     const text = e.clipboardData?.getData("text/plain") ?? "";
+    if (!text) return;
     const g = this.grid;
     const r = g.rect;
     const s = this.sheet;
@@ -770,8 +783,8 @@ class BookPage {
     const items: Array<MenuItem | "-"> = [];
     if (kind === "cell") {
       items.push(
-        { label: "Cut", hint: `${MOD}X`, run: () => { g.focusGrid(); document.execCommand("cut"); } },
-        { label: "Copy", hint: `${MOD}C`, run: () => { g.focusGrid(); document.execCommand("copy"); } },
+        { label: "Cut", hint: `${MOD}X`, run: () => { g.focusProxy(); document.execCommand("cut"); g.focusGrid(); } },
+        { label: "Copy", hint: `${MOD}C`, run: () => { g.focusProxy(); document.execCommand("copy"); g.focusGrid(); } },
         // Paste needs the keyboard shortcut (browsers block menu paste on plain HTTP); hide it on touch screens.
         ...(matchMedia("(pointer: coarse)").matches ? [] : [{ label: "Paste", hint: `${MOD}V`, disabled: true }]),
         "-",
