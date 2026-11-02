@@ -725,19 +725,36 @@ export function transform(op: Op, prior: Op, doc?: Doc, priorFirst = true): Op |
 }
 
 /**
+ * `p` moved past `op`. An earlier-ordered delete (priorFirst false: `p` came first) carried past
+ * rows inserted strictly inside it splits around them: it deleted the rows it saw, never the new
+ * ones. Otherwise this is transform().
+ */
+export function carryPast(p: Op, op: Op, doc?: Doc, priorFirst = true): Op[] {
+  if (!priorFirst && p.t === "delete" && op.t === "insert" && op.s === p.s && op.axis === p.axis && op.at > p.at && op.at < p.at + p.n) {
+    const head = op.at - p.at;
+    // A sequence: once the first part has run, the rest starts right after the inserted rows.
+    return [{ ...p, n: head }, { ...p, at: p.at + op.n, n: p.n - head }];
+  }
+  const t = transform(p, op, doc, priorFirst);
+  return t ? [t] : [];
+}
+
+/**
  * Rebase the op sequence `ops` past the sequence `prior`. Each op in a sequence is in the frame its
  * predecessors leave (an undo of a row delete is "insert the row, then refill it"), so each prior
- * op is itself moved past each op of `ops` before it meets the next one.
+ * op is itself carried past each op of `ops` before it meets the next one (and may split doing so).
+ * `carve`, given an op and a prior op in the same frame, may return only the parts to keep.
  */
-export function transformAll(ops: Op[], prior: Op[], doc?: Doc, priorFirst = true): Op[] {
+export function transformAll(ops: Op[], prior: Op[], doc?: Doc, priorFirst = true, carve?: (op: Op, p: Op) => Op[]): Op[] {
   let out = ops;
   for (const p0 of prior) {
     const next: Op[] = [];
-    let p: Op | null = p0;
+    let ps: Op[] = [p0];
     for (const op of out) {
-      const t = p ? transform(op, p, doc, priorFirst) : op;
-      if (t) next.push(t);
-      if (p) p = transform(p, op, doc, !priorFirst);
+      let parts = [op];
+      for (const p of ps) parts = parts.flatMap((x) => (carve ? carve(x, p) : [x]).flatMap((y) => carryPast(y, p, doc, priorFirst)));
+      next.push(...parts);
+      ps = ps.flatMap((p) => carryPast(p, op, doc, !priorFirst));
     }
     out = next;
   }

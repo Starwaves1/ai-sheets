@@ -313,31 +313,18 @@ function footprint(op: Op): { cells: Map<string, Set<number>>; ranges: Array<{ k
 }
 
 /**
- * Rebase the inverse sequence `inv` past the later op `p0`; with `carveOut`, set aside what `p0`
- * overwrote. Each op of `inv` is in the frame its predecessors leave (insert the row, then refill
- * it), so `p0` is carried through the sequence and compared with each op in that op's own frame.
+ * Rebase the inverse sequence `inv` past the later op `p0` (the shared walk in transformAll) and,
+ * with `carveOut`, set aside what `p0` overwrote, comparing in each inverse op's own frame.
  */
 function pastLater(inv: Op[], p0: Op, doc: Doc, carveOut: boolean): { keep: Op[]; skip: Op[]; gone: Array<{ s: string; what: string }> } {
-  const keep: Op[] = [], skip: Op[] = [];
+  const skip: Op[] = [];
   const gone: Array<{ s: string; what: string }> = [];
-  let p: Op | null = p0;
-  for (const op of inv) {
-    if (!p) {
-      keep.push(op);
-      continue;
-    }
-    const parts = carveOut ? carveOne(op, p) : { keep: [op], skip: [] };
-    for (const x of parts.keep) {
-      const t = transform(x, p, doc);
-      if (t) keep.push(t);
-      if (carveOut) gone.push(...lostTo(x, p));
-    }
-    for (const x of parts.skip) {
-      const t = transform(x, p, doc);
-      if (t) skip.push(t);
-    }
-    p = transform(p, op, doc, false);
-  }
+  const keep = transformAll(inv, [p0], doc, true, carveOut ? (op, p) => {
+    const parts = carveOne(op, p);
+    for (const x of parts.skip) skip.push(...transformAll([x], [p], doc));
+    for (const x of parts.keep) gone.push(...lostTo(x, p));
+    return parts.keep;
+  } : undefined);
   return { keep, skip, gone };
 }
 

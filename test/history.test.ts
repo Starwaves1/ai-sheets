@@ -218,3 +218,58 @@ test("nit: restore works when a deleted sheet's old name is now held by another 
   const norm = (j: DocJSON) => JSON.stringify({ ...j, sheets: j.sheets.map((sh) => ({ ...sh, cells: [...sh.cells].sort((x, y) => x[0] - y[0] || x[1] - y[1]) })) });
   assert.equal(norm(docToJSON(L.wb.doc)), norm(L.versions[v]!));
 });
+
+// ---- review round 2 ----
+
+const rows6 = () => {
+  const L = new Log();
+  L.set("g", Object.fromEntries(Array.from({ length: 6 }, (_, i) => [`A${i + 1}`, `r${i}`])));
+  return L;
+};
+
+test("B: reverting a delete after a later delete straddling where its rows come back", () => {
+  const L = rows6();
+  const T = L.edit("g", [{ t: "delete", s: "s1", axis: "row", at: 1, n: 2 }]); // [r0,r3,r4,r5]
+  L.edit("c", [{ t: "delete", s: "s1", axis: "row", at: 0, n: 2 }]); // [r4,r5]
+  const plan = L.revert([T]);
+  assert.deepEqual(colA(L, 4), ["r1", "r2", "r4", "r5"]);
+  assert.deepEqual(plan.skipped, []);
+});
+
+test("B: the same through the undo stack (Ctrl+Z rebases the inverse with transformAll)", () => {
+  const L = rows6();
+  const T = L.edit("g", [{ t: "delete", s: "s1", axis: "row", at: 1, n: 2 }]);
+  const later: Op[] = [{ t: "delete", s: "s1", axis: "row", at: 0, n: 2 }];
+  L.edit("c", later);
+  L.wb.apply(transformAll(L.changes[T - 1]!.inv!, later, L.wb.doc));
+  assert.deepEqual(colA(L, 4), ["r1", "r2", "r4", "r5"]);
+});
+
+test("G: two pending browser edits rebased past a remote delete keep the typed value in the new row", () => {
+  // The browser inserted a row at 1 and then typed into it; meanwhile the server ordered a
+  // delete of rows 0-2 first. Rebase as Session.receive does: each pending change past the
+  // remote ops, then the remote ops past it before they meet the next pending change.
+  const L = rows6();
+  const remote: Op[] = [{ t: "delete", s: "s1", axis: "row", at: 0, n: 3 }];
+  const pending: Op[][] = [[{ t: "insert", s: "s1", axis: "row", at: 1, n: 1 }], [{ t: "set", s: "s1", cells: [[1, 0, "new"]] }]];
+  L.wb.apply(remote);
+  let r = remote;
+  for (const p of pending) {
+    const moved = transformAll(p, r, L.wb.doc);
+    r = transformAll(r, p, L.wb.doc, false);
+    L.wb.apply(moved);
+  }
+  assert.deepEqual(colA(L, 4), ["new", "r3", "r4", "r5"]);
+});
+
+test("B: a split delete maps later ops of the sequence correctly (its second part)", () => {
+  // Deleting rows 3-4 breaks B6's =A3; the inverse re-inserts the rows, refills them, and then
+  // restores B6's formula text further down, past where a later delete gets split in two.
+  const L = rows6();
+  L.set("g", { B6: "=A3" });
+  const T = L.edit("g", [{ t: "delete", s: "s1", axis: "row", at: 2, n: 2 }]); // [r0,r1,r4,r5]
+  L.edit("c", [{ t: "delete", s: "s1", axis: "row", at: 1, n: 2 }]); // [r0,r5]
+  L.revert([T]);
+  assert.deepEqual(colA(L, 4), ["r0", "r2", "r3", "r5"]);
+  assert.match(L.get("B4"), /^=A\d$/); // the formula came back, not #REF!
+});
