@@ -679,6 +679,7 @@ export function transform(op: Op, prior: Op, doc?: Doc, priorFirst = true): Op |
         const i = op.at > at || (op.at === at && n > 0 && priorFirst) ? shiftIndex(op.at, at, n) : op.at;
         return { ...op, at: i ?? at };
       }
+      if (n > 0 && at > op.at && at < op.at + op.n) return null; // rows inserted inside the span: give up rather than delete them too
       const g = shiftSpan(op.at, op.at + op.n - 1, at, n);
       return g ? { ...op, at: g[0], n: g[1] - g[0] + 1 } : null;
     }

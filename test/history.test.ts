@@ -273,3 +273,12 @@ test("B: a split delete maps later ops of the sequence correctly (its second par
   assert.deepEqual(colA(L, 4), ["r0", "r2", "r3", "r5"]);
   assert.match(L.get("B4"), /^=A\d$/); // the formula came back, not #REF!
 });
+test("C: undoing my insert keeps a row someone inserted inside it, and what they typed", () => {
+  const L = rows6();
+  const T = L.edit("g", [{ t: "insert", s: "s1", axis: "row", at: 5, n: 2 }]);
+  const later: Op[] = [{ t: "insert", s: "s1", axis: "row", at: 6, n: 1 }, { t: "set", s: "s1", cells: [[6, 0, "L"]] }];
+  L.edit("c", later);
+  L.wb.apply(transformAll(L.changes[T - 1]!.inv!, later, L.wb.doc));
+  assert.ok(colA(L, 10).includes("L"));
+});
+
