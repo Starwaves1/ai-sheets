@@ -87,22 +87,47 @@ export class Store {
   books(): BookRow[] {
     const rows = this.db.prepare(`SELECT b.*, COALESCE(s.doc, NULLIF(b.snapshot, '')) AS doc FROM books b
       LEFT JOIN snaps s ON s.book = b.id AND s.v = b.snap_version WHERE b.deleted = 0 ORDER BY b.updated DESC`).all() as Array<Record<string, unknown>>;
-    return rows.map((r) => ({
+    // A book whose snapshot can't be read (say, a crash tore it) is skipped and logged, never fatal.
+    return rows.flatMap((r) => {
+      let snapshot: DocJSON;
+      try {
+        snapshot = JSON.parse(r.doc as string) as DocJSON;
+        if (!snapshot || !Array.isArray(snapshot.sheets)) throw new Error("no snapshot");
+      } catch (e) {
+        console.error(`skipping workbook ${r.id as string} (${r.name as string}): ${(e as Error).message}`);
+        return [];
+      }
+      return [{
       id: r.id as string,
       name: r.name as string,
       created: r.created as number,
       updated: r.updated as number,
       version: r.version as number,
       snapVersion: r.snap_version as number,
-      snapshot: JSON.parse(r.doc as string) as DocJSON,
-    }));
+      snapshot,
+    }];
+    });
+  }
+
+  /** Run statements as one transaction: all of them land, or none. */
+  private tx(run: () => void): void {
+    this.db.exec("BEGIN");
+    try {
+      run();
+      this.db.exec("COMMIT");
+    } catch (e) {
+      this.db.exec("ROLLBACK");
+      throw e;
+    }
   }
 
   create(id: string, name: string, doc: DocJSON, now: number): void {
-    this.db
-      .prepare("INSERT INTO books (id, name, created, updated, version, snap_version, snapshot) VALUES (?, ?, ?, ?, 0, 0, '')")
-      .run(id, name, now, now);
-    this.db.prepare("INSERT OR REPLACE INTO snaps (book, v, doc) VALUES (?, 0, ?)").run(id, JSON.stringify(doc));
+    this.tx(() => {
+      this.db
+        .prepare("INSERT INTO books (id, name, created, updated, version, snap_version, snapshot) VALUES (?, ?, ?, ?, 0, 0, '')")
+        .run(id, name, now, now);
+      this.db.prepare("INSERT OR REPLACE INTO snaps (book, v, doc) VALUES (?, 0, ?)").run(id, JSON.stringify(doc));
+    });
   }
 
   /** Record a change and bump the book's version in one transaction. */
@@ -121,8 +146,10 @@ export class Store {
   }
 
   snapshot(book: string, version: number, doc: DocJSON): void {
-    this.db.prepare("INSERT OR REPLACE INTO snaps (book, v, doc) VALUES (?, ?, ?)").run(book, version, JSON.stringify(doc));
-    this.db.prepare("UPDATE books SET snap_version = ? WHERE id = ?").run(version, book);
+    this.tx(() => {
+      this.db.prepare("INSERT OR REPLACE INTO snaps (book, v, doc) VALUES (?, ?, ?)").run(book, version, JSON.stringify(doc));
+      this.db.prepare("UPDATE books SET snap_version = ? WHERE id = ?").run(version, book);
+    });
   }
 
   /** The newest kept snapshot at or before version v. */
@@ -182,10 +209,10 @@ export class Store {
 
   /** Hard delete: the book and all its history leave the file (tests and scratch books). */
   purge(book: string): void {
-    this.db.exec("BEGIN");
-    for (const t of ["changes", "snaps", "checkpoints"]) this.db.prepare(`DELETE FROM ${t} WHERE book = ?`).run(book);
-    this.db.prepare("DELETE FROM books WHERE id = ?").run(book);
-    this.db.exec("COMMIT");
+    this.tx(() => {
+      for (const t of ["changes", "snaps", "checkpoints"]) this.db.prepare(`DELETE FROM ${t} WHERE book = ?`).run(book);
+      this.db.prepare("DELETE FROM books WHERE id = ?").run(book);
+    });
   }
 
   close(): void {

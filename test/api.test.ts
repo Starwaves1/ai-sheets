@@ -283,3 +283,27 @@ test("purge erases a workbook and its history; a plain delete keeps it in the fi
   }
   db.close();
 });
+
+test("crash safety: a book torn between its row and its first snapshot does not stop the server", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sheets-torn-"));
+  const first = startServer({ port: 0, host: "127.0.0.1", dataDir: dir, publicDir: dir });
+  await new Promise((r) => first.server.once("listening", r));
+  let port = (first.server.address() as AddressInfo).port;
+  const ok = (await fetch(`http://127.0.0.1:${port}/api/books`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ name: "Fine" }) }).then((x) => x.json())) as { id: string };
+  await first.close();
+  // What a crash between "insert the book row" and "insert its v0 snapshot" leaves behind.
+  const { DatabaseSync } = await import("node:sqlite");
+  const db = new DatabaseSync(join(dir, "sheets.db"));
+  db.prepare("INSERT INTO books (id, name, created, updated, version, snap_version, snapshot) VALUES ('torn', 'Torn', 1, 1, 0, 0, '')").run();
+  db.close();
+  const again = startServer({ port: 0, host: "127.0.0.1", dataDir: dir, publicDir: dir });
+  try {
+    await new Promise((r) => again.server.once("listening", r));
+    port = (again.server.address() as AddressInfo).port;
+    const list = (await fetch(`http://127.0.0.1:${port}/api/books`).then((x) => x.json())) as Array<{ id: string }>;
+    assert.deepEqual(list.map((b) => b.id), [ok.id]);
+  } finally {
+    await again.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

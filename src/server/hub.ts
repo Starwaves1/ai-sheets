@@ -133,17 +133,24 @@ export class Hub {
 
   constructor(readonly store: Store) {
     for (const row of store.books()) {
-      const wb = Workbook.fromJSON(row.snapshot);
-      const changes = store.changesSince(row.id, row.snapVersion);
-      for (const c of changes) {
-        const { inverse } = wb.apply(c.ops);
-        if (!c.inv) store.setInverse(row.id, c.v, inverse); // changes from before inverses were kept
+      try {
+        this.load(row);
+      } catch (e) {
+        console.error(`skipping workbook ${row.id} (${row.name}): ${(e as Error).message}`);
       }
-      const lb = new LiveBook(row.id, wb, row.version, row.created, row.updated, row.snapVersion);
-      // Keep recent history (even if already in the snapshot) for transforms and resend dedupe.
-      lb.recent = store.changesSince(row.id, Math.max(0, row.version - RECENT));
-      this.books.set(row.id, lb);
     }
+  }
+
+  private load(row: ReturnType<Store["books"]>[number]): void {
+    const wb = Workbook.fromJSON(row.snapshot);
+    for (const c of this.store.changesSince(row.id, row.snapVersion)) {
+      const { inverse } = wb.apply(c.ops);
+      if (!c.inv) this.store.setInverse(row.id, c.v, inverse); // changes from before inverses were kept
+    }
+    const lb = new LiveBook(row.id, wb, row.version, row.created, row.updated, row.snapVersion);
+    // Keep recent history (even if already in the snapshot) for transforms and resend dedupe.
+    lb.recent = this.store.changesSince(row.id, Math.max(0, row.version - RECENT));
+    this.books.set(row.id, lb);
   }
 
   list(): LiveBook[] {
