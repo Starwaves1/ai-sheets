@@ -454,11 +454,15 @@ export function restoreOps(cur: Doc, target: Doc, sheetId?: string): Op[] {
     applyAll(scratch, [op]);
     ops.push(op);
   };
-  const temp = (id: string) => `restoring ${id} ${Date.now().toString(36)}`;
+  const temp = (id: string) => `restoring ${id}`; // ids are unique, so these names are too
+  const readded = new Set<string>();
   const sheet = (id: string) => scratch.sheets.find((s) => s.id === id);
   // 1. Sheets that are gone come back, under temporary names (their old names may be taken).
   for (const [i, t] of target.sheets.entries()) {
-    if (want.includes(t) && !sheet(t.id)) run({ t: "addSheet", sheet: { ...sheetToJSON(t), name: temp(t.id) }, index: i });
+    if (want.includes(t) && !sheet(t.id)) {
+      run({ t: "addSheet", sheet: { ...sheetToJSON(t), name: temp(t.id) }, index: i });
+      readded.add(t.id);
+    }
   }
   // 2. Sheets that did not exist then go (whole-workbook restores only).
   if (!sheetId) for (const s of [...scratch.sheets]) if (!target.sheets.some((t) => t.id === s.id)) run({ t: "deleteSheet", s: s.id });
@@ -467,7 +471,7 @@ export function restoreOps(cur: Doc, target: Doc, sheetId?: string): Op[] {
   if (sheetId) {
     for (const t of renames) if (!scratch.sheets.some((s) => s.id !== t.id && s.name.toLowerCase() === t.name.toLowerCase())) run({ t: "renameSheet", s: t.id, name: t.name });
   } else {
-    for (const t of renames) if (!sheet(t.id)!.name.startsWith("restoring ")) run({ t: "renameSheet", s: t.id, name: temp(t.id) });
+    for (const t of renames) if (!readded.has(t.id)) run({ t: "renameSheet", s: t.id, name: temp(t.id) });
     for (const t of renames) run({ t: "renameSheet", s: t.id, name: t.name });
   }
   // 4. Contents, compared with the sheets as they now are.

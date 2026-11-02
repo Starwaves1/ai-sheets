@@ -282,3 +282,16 @@ test("C: undoing my insert keeps a row someone inserted inside it, and what they
   assert.ok(colA(L, 10).includes("L"));
 });
 
+
+test("F: restore ops are deterministic", async () => {
+  const L = new Log();
+  L.set("g", { A1: "keep" });
+  const v = L.changes.length;
+  L.edit("g", [{ t: "renameSheet", s: "s1", name: "Old" }]);
+  L.edit("g", [{ t: "addSheet", sheet: { id: "s2", name: "Sheet1", rows: 10, cols: 5, cells: [] } }]);
+  L.edit("g", [{ t: "deleteSheet", s: "s1" }]);
+  const a = restoreOps(L.wb.doc, docFromJSON(L.versions[v]!));
+  await new Promise((r) => setTimeout(r, 5));
+  const b = restoreOps(L.wb.doc, docFromJSON(L.versions[v]!));
+  assert.deepEqual(a, b);
+});
