@@ -173,6 +173,32 @@ test("finding 1: insert and move converge in either order (property)", () => {
   assert.equal(diverged, 0, `${diverged}/${total} insert/move pairs diverge`);
 });
 
+test("insert and delete converge in either order, including inserts inside the deleted span (property)", () => {
+  const vals = Array.from({ length: 10 }, (_, i) => `r${i}`);
+  const base = () => {
+    const wb = new Workbook(newDoc("t"));
+    wb.apply([{ t: "grid", s: "s1", rows: 10, cols: 2 }, { t: "set", s: "s1", cells: vals.map((v, i) => [i, 0, v] as [number, number, string]) }]);
+    return wb;
+  };
+  const col = (wb: Workbook) => Array.from({ length: 13 }, (_, i) => wb.doc.sheets[0]!.cells.get(i * 16384)?.v ?? "").join(",");
+  let diverged = 0, total = 0;
+  for (let at = 0; at <= 10; at++) for (const ni of [1, 2]) for (let from = 0; from < 10; from++) for (const n of [1, 2, 3]) {
+    if (from + n > 10) continue;
+    const ins: Op = { t: "insert", s: "s1", axis: "row", at, n: ni };
+    const del: Op = { t: "delete", s: "s1", axis: "row", at: from, n };
+    for (const [x, y] of [[ins, del], [del, ins]] as Array<[Op, Op]>) {
+      const a = base(), b = base();
+      a.apply([x]);
+      a.apply(transformAll([y], [x], a.doc));
+      b.apply([y]);
+      b.apply(transformAll([x], [y], b.doc, false));
+      total++;
+      if (col(a) !== col(b)) diverged++;
+    }
+  }
+  assert.equal(diverged, 0, `${diverged}/${total} insert/delete pairs diverge`);
+});
+
 test("finding 2: reverting a delete after the row below it was edited and a row inserted above", () => {
   const L = new Log();
   L.set("g", { A1: "r0", A2: "r1", A3: "r2", A4: "r3" });

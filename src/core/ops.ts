@@ -679,7 +679,6 @@ export function transform(op: Op, prior: Op, doc?: Doc, priorFirst = true): Op |
         const i = op.at > at || (op.at === at && n > 0 && priorFirst) ? shiftIndex(op.at, at, n) : op.at;
         return { ...op, at: i ?? at };
       }
-      if (n > 0 && at > op.at && at < op.at + op.n) return null; // rows inserted inside the span: give up rather than delete them too
       const g = shiftSpan(op.at, op.at + op.n - 1, at, n);
       return g ? { ...op, at: g[0], n: g[1] - g[0] + 1 } : null;
     }
@@ -726,12 +725,11 @@ export function transform(op: Op, prior: Op, doc?: Doc, priorFirst = true): Op |
 }
 
 /**
- * `p` moved past `op`. An earlier-ordered delete (priorFirst false: `p` came first) carried past
- * rows inserted strictly inside it splits around them: it deleted the rows it saw, never the new
- * ones. Otherwise this is transform().
+ * `p` moved past `op`. A delete carried past rows inserted strictly inside it splits around them:
+ * it deletes the rows it saw, never the new ones, in either order. Otherwise this is transform().
  */
 export function carryPast(p: Op, op: Op, doc?: Doc, priorFirst = true): Op[] {
-  if (!priorFirst && p.t === "delete" && op.t === "insert" && op.s === p.s && op.axis === p.axis && op.at > p.at && op.at < p.at + p.n) {
+  if (p.t === "delete" && op.t === "insert" && op.s === p.s && op.axis === p.axis && op.at > p.at && op.at < p.at + p.n) {
     const head = op.at - p.at;
     // A sequence: once the first part has run, the rest starts right after the inserted rows.
     return [{ ...p, n: head }, { ...p, at: p.at + op.n, n: p.n - head }];
@@ -753,7 +751,10 @@ export function transformAll(ops: Op[], prior: Op[], doc?: Doc, priorFirst = tru
     let ps: Op[] = [p0];
     for (const op of out) {
       let parts = [op];
-      for (const p of ps) parts = parts.flatMap((x) => (carve ? carve(x, p) : [x]).flatMap((y) => carryPast(y, p, doc, priorFirst)));
+      for (const p of ps) {
+        const kept = carve ? parts.flatMap((x) => carve(x, p)) : parts;
+        parts = kept.flatMap((y) => carryPast(y, p, doc, priorFirst));
+      }
       next.push(...parts);
       ps = ps.flatMap((p) => carryPast(p, op, doc, !priorFirst));
     }
