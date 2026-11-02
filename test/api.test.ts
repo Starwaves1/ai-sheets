@@ -307,3 +307,13 @@ test("crash safety: a book torn between its row and its first snapshot does not 
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test("purge only takes the exact workbook id, never a name or prefix", async () => {
+  const a = await req("POST", "/api/books", { name: "Keep me safe" });
+  for (const ref of ["Keep%20me%20safe", "keep", a.data.id.slice(0, 5)]) {
+    const r = await req("DELETE", `/api/books/${ref}?purge=1`);
+    assert.ok(r.status === 400 || r.status === 404, `${ref}: ${r.status}`); // refused, or no such book
+  }
+  assert.equal((await req("GET", `/api/books/${a.data.id}`)).status, 200);
+  assert.equal((await req("DELETE", `/api/books/${a.data.id}?purge=1`)).data.purged, true);
+});

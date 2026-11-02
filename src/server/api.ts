@@ -174,6 +174,8 @@ export function makeApi(hub: Hub) {
     if (sub === "" && m === "GET") return send(res, 200, lb.summary());
     if (sub === "" && m === "DELETE") {
       const purge = q.get("purge") === "1";
+      // Erasing is irreversible: only by the exact id, never a name or prefix that happens to match.
+      if (purge && decodeURIComponent(parts[1]) !== lb.id) throw new HttpError(400, `purge needs the workbook's exact id (${lb.id} is "${lb.name}")`);
       hub.remove(lb, purge);
       return send(res, 200, { deleted: lb.id, ...(purge ? { purged: true } : {}) });
     }
